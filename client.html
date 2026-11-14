@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ZT Remote Desktop</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:#0e1116; color:#e6ebf2; }
+  header { padding:10px 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; background:#151a22; }
+  header h1 { font-size:15px; margin:0 8px 0 0; font-weight:600; }
+  input[type=password], input[type=text] { background:#0e1116; border:1px solid #2c3542; color:#e6ebf2;
+    border-radius:8px; padding:8px 10px; font-size:14px; }
+  button { background:#2456a6; border:0; color:#fff; border-radius:8px; padding:8px 12px; font-size:14px; }
+  button.secondary { background:#232b36; }
+  button.key { background:#232b36; min-width:44px; }
+  button.key:active { background:#3a4560; }
+  #status { font-size:13px; opacity:.85; }
+  #screenWrap { position:relative; width:100%; background:#000; touch-action:none; user-select:none; -webkit-user-select:none; }
+  canvas { display:block; width:100%; }
+  .bar { display:flex; gap:6px; flex-wrap:wrap; padding:8px; background:#151a22; }
+  .bar span { font-size:12px; opacity:.7; align-self:center; margin-right:2px; }
+  select { background:#0e1116; color:#e6ebf2; border:1px solid #2c3542; border-radius:6px; padding:5px; }
+  #typeBox { flex:1; min-width:140px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ZT Remote Desktop</h1>
+  <input id="token" type="password" placeholder="Access token" autocomplete="off">
+  <button id="connectBtn">Connect</button>
+  <button id="disconnectBtn" class="secondary hidden">Disconnect</button>
+  <span id="status">Not connected</span>
+</header>
+
+<div id="screenWrap"><canvas id="screen" width="960" height="540"></canvas></div>
+
+<div class="bar" id="keysBar">
+  <span>Keys:</span>
+  <button class="key" data-key="esc">Esc</button>
+  <button class="key" data-key="tab">Tab</button>
+  <button class="key" data-key="enter">Enter</button>
+  <button class="key" data-key="backspace">⌫</button>
+  <button class="key" data-key="delete">Del</button>
+  <button class="key" data-key="cmd">Win/⌘</button>
+  <button class="key" data-combo="ctrl,c">Ctrl+C</button>
+  <button class="key" data-combo="ctrl,v">Ctrl+V</button>
+  <button class="key" data-combo="ctrl,z">Ctrl+Z</button>
+  <button class="key" data-combo="alt,tab">Alt+Tab</button>
+  <button class="key" data-key="up">↑</button>
+  <button class="key" data-key="down">↓</button>
+  <button class="key" data-key="left">←</button>
+  <button class="key" data-key="right">→</button>
+</div>
+
+<div class="bar">
+  <input id="typeBox" type="text" placeholder="Type here and press Send (or Enter) to type on the PC">
+  <button id="sendTextBtn" class="secondary">Send text</button>
+  <button id="kbBtn" class="secondary">Phone keyboard</button>
+</div>
+
+<div class="bar">
+  <span>Quality</span>
+  <select id="quality"><option>40</option><option selected>60</option><option>75</option><option>90</option></select>
+  <span>Width</span>
+  <select id="maxWidth"><option>960</option><option selected>1280</option><option>1600</option><option value="0">Original</option></select>
+  <span>FPS</span>
+  <select id="fps"><option>8</option><option selected>12</option><option>20</option><option>30</option></select>
+  <span style="flex:1"></span>
+  <span>Touch: drag = move mouse · tap = click · hold = right-click · two-finger drag = scroll</span>
+</div>
+
+<!-- hidden input used to summon the phone keyboard for live typing -->
+<input id="kbSink" type="text" style="position:fixed;bottom:0;left:0;width:10px;height:10px;opacity:0.01;border:0;padding:0;">
+
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $("screen"), ctx = canvas.getContext("2d");
+let ws = null, connected = false;
+let screenW = 0, screenH = 0;
+
+$("token").value = localStorage.getItem("zt_token") || "";
+
+function setStatus(t){ $("status").textContent = t; }
+function send(obj){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+function sendConfig(){
+  send({type:"config",
+        quality: parseInt($("quality").value),
+        max_width: parseInt($("maxWidth").value),
+        fps: parseInt($("fps").value)});
+}
+["quality","maxWidth","fps"].forEach(id => $(id).addEventListener("change", sendConfig));
+
+$("connectBtn").onclick = () => {
+  const token = $("token").value.trim();
+  if (!token) { setStatus("Enter the access token shown on the PC"); return; }
+  localStorage.setItem("zt_token", token);
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/ws");
+  ws.binaryType = "blob";
+  setStatus("Connecting…");
+  ws.onopen = () => send({type:"auth", token});
+  ws.onmessage = ev => {
+    if (typeof ev.data === "string") {
+      const m = JSON.parse(ev.data);
+      if (m.type === "auth_ok") {
+        connected = true;
+        setStatus("Connected" + (m.demo ? " (DEMO mode)" : ""));
+        $("connectBtn").classList.add("hidden");
+        $("disconnectBtn").classList.remove("hidden");
+        sendConfig();
+      } else if (m.type === "auth_failed") {
+        setStatus("Wrong token — check the token on the PC");
+        ws.close();
+      } else if (m.type === "meta") {
+        screenW = m.screen_w; screenH = m.screen_h;
+      } else if (m.type === "error") {
+        setStatus("PC error: " + m.message);
+      }
+      return;
+    }
+    // binary frame = JPEG
+    const url = URL.createObjectURL(ev.data);
+    const img = new Image();
+    img.onload = () => {
+      if (canvas.width !== img.width || canvas.height !== img.height) {
+        canvas.width = img.width; canvas.height = img.height;
+      }
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  };
+  ws.onclose = () => {
+    connected = false;
+    setStatus("Disconnected");
+    $("connectBtn").classList.remove("hidden");
+    $("disconnectBtn").classList.add("hidden");
+  };
+};
+$("disconnectBtn").onclick = () => ws && ws.close();
+
+/* ---------- pointer handling (mouse + touch) ---------- */
+function posFromEvent(e){
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  const cx = (t.clientX !== undefined) ? t.clientX : e.clientX;
+  const cy = (t.clientY !== undefined) ? t.clientY : e.clientY;
+  return { x: Math.min(1, Math.max(0, (cx - r.left) / r.width)),
+           y: Math.min(1, Math.max(0, (cy - r.top) / r.height)) };
+}
+let lastMove = 0;
+function moveThrottled(p){
+  const now = Date.now();
+  if (now - lastMove < 30) return;
+  lastMove = now;
+  send({type:"mouse_move", x:p.x, y:p.y});
+}
+canvas.addEventListener("mousemove", e => { if (connected) moveThrottled(posFromEvent(e)); });
+canvas.addEventListener("mousedown", e => {
+  if (!connected) return;
+  const p = posFromEvent(e);
+  send({type:"mouse_move", x:p.x, y:p.y});
+  send({type:"mouse_down", x:p.x, y:p.y, button: e.button === 2 ? "right" : (e.button === 1 ? "middle" : "left")});
+});
+window.addEventListener("mouseup", e => {
+  if (!connected) return;
+  send({type:"mouse_up", button: e.button === 2 ? "right" : (e.button === 1 ? "middle" : "left")});
+});
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("wheel", e => {
+  if (!connected) return;
+  e.preventDefault();
+  send({type:"scroll", dx:0, dy: e.deltaY > 0 ? -3 : 3});
+}, {passive:false});
+
+/* touch: drag = move, tap = click, long-press = right click, 2-finger drag = scroll */
+let touchStart = null, longTimer = null, twoFingerY = null;
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  if (e.touches.length === 2) { twoFingerY = e.touches[0].clientY; return; }
+  const p = posFromEvent(e);
+  touchStart = {p, t: Date.now(), moved:false};
+  send({type:"mouse_move", x:p.x, y:p.y});
+  longTimer = setTimeout(() => {
+    if (touchStart && !touchStart.moved) {
+      send({type:"mouse_down", x:p.x, y:p.y, button:"right"});
+      send({type:"mouse_up", button:"right"});
+      touchStart.longFired = true;
+    }
+  }, 550);
+}, {passive:false});
+canvas.addEventListener("touchmove", e => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    const y = e.touches[0].clientY;
+    if (twoFingerY !== null && Math.abs(y - twoFingerY) > 24) {
+      send({type:"scroll", dx:0, dy: y < twoFingerY ? -3 : 3});
+      twoFingerY = y;
+    }
+    return;
+  }
+  const p = posFromEvent(e);
+  if (touchStart) {
+    const dx = Math.abs(p.x - touchStart.p.x), dy = Math.abs(p.y - touchStart.p.y);
+    if (dx > 0.01 || dy > 0.01) touchStart.moved = true;
+  }
+  moveThrottled(p);
+}, {passive:false});
+canvas.addEventListener("touchend", e => {
+  e.preventDefault();
+  clearTimeout(longTimer);
+  twoFingerY = null;
+  if (!touchStart) return;
+  const dt = Date.now() - touchStart.t;
+  if (!touchStart.moved && !touchStart.longFired && dt < 350) {
+    const p = touchStart.p;
+    send({type:"mouse_down", x:p.x, y:p.y, button:"left"});
+    send({type:"mouse_up", button:"left"});
+  }
+  touchStart = null;
+}, {passive:false});
+canvas.addEventListener("dblclick", e => {
+  if (!connected) return;
+  const p = posFromEvent(e);
+  send({type:"mouse_down", x:p.x, y:p.y, button:"left"});
+  send({type:"mouse_up", button:"left"});
+});
+
+/* ---------- keyboard ---------- */
+document.querySelectorAll("#keysBar button").forEach(b => {
+  b.addEventListener("click", () => {
+    if (b.dataset.key) send({type:"key", key:b.dataset.key});
+    else if (b.dataset.combo) {
+      const parts = b.dataset.combo.split(",");
+      send({type:"key", key:parts[parts.length-1], modifiers:parts.slice(0,-1)});
+    }
+  });
+});
+function sendTypeBox(){
+  const v = $("typeBox").value;
+  if (v) { send({type:"text", text:v}); $("typeBox").value = ""; }
+}
+$("sendTextBtn").onclick = sendTypeBox;
+$("typeBox").addEventListener("keydown", e => { if (e.key === "Enter") sendTypeBox(); });
+
+$("kbBtn").onclick = () => { $("kbSink").value = ""; $("kbSink").focus(); };
+$("kbSink").addEventListener("input", e => {
+  const v = e.target.value;
+  if (v) { send({type:"text", text:v}); e.target.value = ""; }
+});
+$("kbSink").addEventListener("keydown", e => {
+  if (e.key === "Backspace") send({type:"key", key:"backspace"});
+  if (e.key === "Enter") send({type:"key", key:"enter"});
+});
+
+/* physical keyboard capture when the canvas area was last clicked */
+let kbCapture = false;
+canvas.addEventListener("mousedown", () => { kbCapture = true; });
+document.addEventListener("keydown", e => {
+  if (!connected || !kbCapture) return;
+  if (document.activeElement === $("typeBox") || document.activeElement === $("token")) return;
+  const mods = [];
+  if (e.ctrlKey) mods.push("ctrl");
+  if (e.altKey) mods.push("alt");
+  if (e.shiftKey) mods.push("shift");
+  if (e.metaKey) mods.push("cmd");
+  let key = e.key;
+  if (key === " ") key = "space";
+  if (key.length === 1 && mods.length === 0) { send({type:"text", text:key}); return; }
+  if (key.length === 1) key = key.toLowerCase();
+  send({type:"key", key:key, modifiers:mods});
+  if (["tab","alt"].includes(key.toLowerCase()) || mods.length) e.preventDefault();
+});
+</script>
+</body>
+</html>

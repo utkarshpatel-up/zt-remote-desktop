@@ -1,0 +1,12 @@
+# Local access token - never commit
+zt-remote-config.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-test/
+
+# OS
+.DS_Store
+Thumbs.db
