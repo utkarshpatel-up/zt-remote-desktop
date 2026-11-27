@@ -17,8 +17,13 @@
   button.key { background:#232b36; min-width:44px; }
   button.key:active { background:#3a4560; }
   #status { font-size:13px; opacity:.85; }
-  #screenWrap { position:relative; width:100%; background:#000; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #screenWrap { position:relative; width:100%; background:#000; overflow:hidden;
+    touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  #stage { position:relative; transform-origin:0 0; will-change:transform; }
   canvas { display:block; width:100%; }
+  #cursor { position:absolute; left:0; top:0; width:18px; height:26px; pointer-events:none;
+    transform-origin:0 0; display:none; filter:drop-shadow(0 0 1px #000); }
+  #fitBtn { position:absolute; right:8px; top:8px; padding:6px 10px; font-size:13px; opacity:.85; }
   .bar { display:flex; gap:6px; flex-wrap:wrap; padding:8px; background:#151a22; }
   .bar span { font-size:12px; opacity:.7; align-self:center; margin-right:2px; }
   select { background:#0e1116; color:#e6ebf2; border:1px solid #2c3542; border-radius:6px; padding:5px; }
@@ -35,7 +40,16 @@
   <span id="status">Not connected</span>
 </header>
 
-<div id="screenWrap"><canvas id="screen" width="960" height="540"></canvas></div>
+<div id="screenWrap">
+  <div id="stage">
+    <canvas id="screen" width="960" height="540"></canvas>
+    <svg id="cursor" viewBox="0 0 18 26" aria-hidden="true">
+      <path d="M1 1 L1 21 L6 16.5 L9.5 24.5 L13 23 L9.5 15 L16 15 Z"
+            fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/>
+    </svg>
+  </div>
+  <button id="fitBtn" class="secondary hidden">Fit screen</button>
+</div>
 
 <div class="bar" id="keysBar">
   <span>Keys:</span>
@@ -44,11 +58,11 @@
   <button class="key" data-key="enter">Enter</button>
   <button class="key" data-key="backspace">⌫</button>
   <button class="key" data-key="delete">Del</button>
-  <button class="key" data-key="cmd">Win/⌘</button>
-  <button class="key" data-combo="ctrl,c">Ctrl+C</button>
-  <button class="key" data-combo="ctrl,v">Ctrl+V</button>
-  <button class="key" data-combo="ctrl,z">Ctrl+Z</button>
-  <button class="key" data-combo="alt,tab">Alt+Tab</button>
+  <button class="key" data-key="cmd" data-pc="Win" data-mac="⌘" data-linux="Super">Win/⌘</button>
+  <button class="key" data-combo="mod,c" data-pc="Ctrl+C" data-mac="⌘C">Ctrl+C</button>
+  <button class="key" data-combo="mod,v" data-pc="Ctrl+V" data-mac="⌘V">Ctrl+V</button>
+  <button class="key" data-combo="mod,z" data-pc="Ctrl+Z" data-mac="⌘Z">Ctrl+Z</button>
+  <button class="key" data-combo="switch,tab" data-pc="Alt+Tab" data-mac="⌘Tab">Alt+Tab</button>
   <button class="key" data-key="up">↑</button>
   <button class="key" data-key="down">↓</button>
   <button class="key" data-key="left">←</button>
@@ -62,6 +76,8 @@
 </div>
 
 <div class="bar">
+  <span>Touch</span>
+  <select id="touchMode"><option value="trackpad">Trackpad</option><option value="direct">Direct</option></select>
   <span>Quality</span>
   <select id="quality"><option>40</option><option selected>60</option><option>75</option><option>90</option></select>
   <span>Width</span>
@@ -69,23 +85,42 @@
   <span>FPS</span>
   <select id="fps"><option>8</option><option selected>12</option><option>20</option><option>30</option></select>
   <span style="flex:1"></span>
-  <span>Touch: drag = move mouse · tap = click · hold = right-click · two-finger drag = scroll</span>
+  <span id="touchHelp"></span>
 </div>
 
 <!-- hidden input used to summon the phone keyboard for live typing -->
-<input id="kbSink" type="text" style="position:fixed;bottom:0;left:0;width:10px;height:10px;opacity:0.01;border:0;padding:0;">
+<input id="kbSink" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+       style="position:fixed;bottom:0;left:0;width:10px;height:10px;opacity:0.01;border:0;padding:0;">
 
 <script>
 const $ = id => document.getElementById(id);
 const canvas = $("screen"), ctx = canvas.getContext("2d");
-let ws = null, connected = false;
+const wrap = $("screenWrap"), stage = $("stage"), cursorEl = $("cursor");
+let ws = null, connected = false, platform = "windows";
 let screenW = 0, screenH = 0;
 
 $("token").value = localStorage.getItem("zt_token") || "";
 
 function setStatus(t){ $("status").textContent = t; }
 function send(obj){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+/* ---------- touch mode ---------- */
+const HELP = {
+  trackpad: "Trackpad: drag = move pointer · tap = click · hold = right-click · hold then drag = drag · " +
+            "two-finger tap = right-click · two-finger drag = scroll · pinch = zoom",
+  direct:   "Direct: drag = move pointer · tap = click there · hold = right-click · hold then drag = drag · " +
+            "two-finger drag = scroll · pinch = zoom",
+};
+let touchMode = localStorage.getItem("zt_touch_mode") || "trackpad";
+$("touchMode").value = touchMode;
+function showHelp(){ $("touchHelp").textContent = HELP[touchMode]; }
+$("touchMode").addEventListener("change", e => {
+  touchMode = e.target.value; localStorage.setItem("zt_touch_mode", touchMode); showHelp();
+});
+showHelp();
+
+/* ---------- stream settings ---------- */
 function sendConfig(){
   send({type:"config",
         quality: parseInt($("quality").value),
@@ -93,6 +128,79 @@ function sendConfig(){
         fps: parseInt($("fps").value)});
 }
 ["quality","maxWidth","fps"].forEach(id => $(id).addEventListener("change", sendConfig));
+
+/* ---------- keys that differ on a Mac ---------- */
+function applyPlatform(){
+  const mac = platform === "mac";
+  document.querySelectorAll("#keysBar button").forEach(b => {
+    const label = mac ? b.dataset.mac : (platform === "linux" && b.dataset.linux) || b.dataset.pc;
+    if (label) b.textContent = label;
+  });
+}
+function comboKeys(combo){
+  const mac = platform === "mac";
+  return combo.split(",").map(k => k === "mod" ? (mac ? "cmd" : "ctrl")
+                                  : k === "switch" ? (mac ? "cmd" : "alt") : k);
+}
+
+/* ---------- zoom / pan ---------- */
+const view = { s: 1, tx: 0, ty: 0 };
+function applyView(){
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  view.s = clamp(view.s, 1, 5);
+  view.tx = clamp(view.tx, W - W * view.s, 0);
+  view.ty = clamp(view.ty, H - H * view.s, 0);
+  stage.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.s})`;
+  cursorEl.style.transform = `scale(${1 / view.s})`;
+  $("fitBtn").classList.toggle("hidden", view.s <= 1.01);
+}
+function resetView(){ view.s = 1; view.tx = 0; view.ty = 0; applyView(); }
+$("fitBtn").onclick = resetView;
+window.addEventListener("resize", applyView);
+
+/* keep the pointer in view while zoomed in trackpad mode */
+function followCursor(){
+  if (view.s <= 1.01 || touchMode !== "trackpad") return;
+  const W = wrap.clientWidth, H = wrap.clientHeight, mx = W * 0.15, my = H * 0.15;
+  const px = view.tx + cursor.x * W * view.s, py = view.ty + cursor.y * H * view.s;
+  if (px < mx) view.tx += mx - px; else if (px > W - mx) view.tx -= px - (W - mx);
+  if (py < my) view.ty += my - py; else if (py > H - my) view.ty -= py - (H - my);
+  applyView();
+}
+
+/* ---------- pointer overlay (screenshots do not include the cursor) ---------- */
+const cursor = { x: 0.5, y: 0.5, known: false };
+let lastLocalMove = 0;
+function drawCursor(){
+  cursorEl.style.display = cursor.known ? "block" : "none";
+  cursorEl.style.left = (cursor.x * 100) + "%";
+  cursorEl.style.top = (cursor.y * 100) + "%";
+}
+function setLocalCursor(x, y){
+  cursor.x = clamp(x, 0, 1); cursor.y = clamp(y, 0, 1); cursor.known = true;
+  lastLocalMove = Date.now();
+  drawCursor(); followCursor();
+}
+
+/* ---------- connection ---------- */
+async function showFrame(blob){
+  if (window.createImageBitmap) {
+    const bmp = await createImageBitmap(blob);
+    drawImage(bmp); bmp.close && bmp.close();
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => { drawImage(img); URL.revokeObjectURL(url); };
+  img.src = url;
+}
+function drawImage(img){
+  if (canvas.width !== img.width || canvas.height !== img.height) {
+    canvas.width = img.width; canvas.height = img.height;
+    requestAnimationFrame(applyView);   // the picture's height changed
+  }
+  ctx.drawImage(img, 0, 0);
+}
 
 $("connectBtn").onclick = () => {
   const token = $("token").value.trim();
@@ -108,6 +216,8 @@ $("connectBtn").onclick = () => {
       const m = JSON.parse(ev.data);
       if (m.type === "auth_ok") {
         connected = true;
+        platform = m.platform || "windows";
+        applyPlatform();
         setStatus("Connected" + (m.demo ? " (DEMO mode)" : ""));
         $("connectBtn").classList.add("hidden");
         $("disconnectBtn").classList.remove("hidden");
@@ -117,25 +227,20 @@ $("connectBtn").onclick = () => {
         ws.close();
       } else if (m.type === "meta") {
         screenW = m.screen_w; screenH = m.screen_h;
+        // our own prediction wins briefly, so the pointer does not jump back
+        if (m.cx !== undefined && Date.now() - lastLocalMove > 400) {
+          cursor.x = m.cx; cursor.y = m.cy; cursor.known = true; drawCursor();
+        }
       } else if (m.type === "error") {
         setStatus("PC error: " + m.message);
       }
       return;
     }
-    // binary frame = JPEG
-    const url = URL.createObjectURL(ev.data);
-    const img = new Image();
-    img.onload = () => {
-      if (canvas.width !== img.width || canvas.height !== img.height) {
-        canvas.width = img.width; canvas.height = img.height;
-      }
-      ctx.drawImage(img, 0, 0);
-      URL.revokeObjectURL(url);
-    };
-    img.src = url;
+    showFrame(ev.data);   // binary frame = JPEG
   };
   ws.onclose = () => {
     connected = false;
+    endGesture();
     setStatus("Disconnected");
     $("connectBtn").classList.remove("hidden");
     $("disconnectBtn").classList.add("hidden");
@@ -143,99 +248,179 @@ $("connectBtn").onclick = () => {
 };
 $("disconnectBtn").onclick = () => ws && ws.close();
 
-/* ---------- pointer handling (mouse + touch) ---------- */
-function posFromEvent(e){
+/* ---------- moves, throttled but never dropping the last one ---------- */
+let moveTimer = null, pendingAbs = null, pendingRel = { dx: 0, dy: 0 };
+function flushMoves(){
+  clearTimeout(moveTimer); moveTimer = null;
+  if (pendingAbs) { send({type:"mouse_move", x:pendingAbs.x, y:pendingAbs.y}); pendingAbs = null; }
+  if (pendingRel.dx || pendingRel.dy) {
+    send({type:"mouse_move_rel", dx:pendingRel.dx, dy:pendingRel.dy});
+    pendingRel = { dx: 0, dy: 0 };
+  }
+}
+function schedule(){ if (!moveTimer) moveTimer = setTimeout(flushMoves, 30); }
+function moveAbs(p){ pendingAbs = p; schedule(); }
+function moveRel(dx, dy){
+  pendingRel.dx += dx; pendingRel.dy += dy;
+  setLocalCursor(cursor.x + dx, cursor.y + dy);
+  schedule();
+}
+function click(button, p){
+  flushMoves();
+  if (p) send({type:"mouse_down", x:p.x, y:p.y, button});
+  else send({type:"mouse_down", button});
+  send({type:"mouse_up", button});
+}
+
+/* position on the remote screen (0..1); the canvas rect already includes zoom */
+function posFromClient(cx, cy){
   const r = canvas.getBoundingClientRect();
-  const t = e.touches ? e.touches[0] : e;
-  const cx = (t.clientX !== undefined) ? t.clientX : e.clientX;
-  const cy = (t.clientY !== undefined) ? t.clientY : e.clientY;
-  return { x: Math.min(1, Math.max(0, (cx - r.left) / r.width)),
-           y: Math.min(1, Math.max(0, (cy - r.top) / r.height)) };
+  return { x: clamp((cx - r.left) / r.width, 0, 1), y: clamp((cy - r.top) / r.height, 0, 1) };
 }
-let lastMove = 0;
-function moveThrottled(p){
-  const now = Date.now();
-  if (now - lastMove < 30) return;
-  lastMove = now;
-  send({type:"mouse_move", x:p.x, y:p.y});
-}
-canvas.addEventListener("mousemove", e => { if (connected) moveThrottled(posFromEvent(e)); });
+
+/* ---------- mouse (desktop browser): always direct ---------- */
+const btnName = b => b === 2 ? "right" : (b === 1 ? "middle" : "left");
+canvas.addEventListener("mousemove", e => {
+  if (connected) { const p = posFromClient(e.clientX, e.clientY); moveAbs(p); setLocalCursor(p.x, p.y); }
+});
 canvas.addEventListener("mousedown", e => {
   if (!connected) return;
-  const p = posFromEvent(e);
-  send({type:"mouse_move", x:p.x, y:p.y});
-  send({type:"mouse_down", x:p.x, y:p.y, button: e.button === 2 ? "right" : (e.button === 1 ? "middle" : "left")});
+  const p = posFromClient(e.clientX, e.clientY);
+  flushMoves();
+  send({type:"mouse_down", x:p.x, y:p.y, button: btnName(e.button)});
 });
 window.addEventListener("mouseup", e => {
   if (!connected) return;
-  send({type:"mouse_up", button: e.button === 2 ? "right" : (e.button === 1 ? "middle" : "left")});
+  flushMoves();
+  send({type:"mouse_up", button: btnName(e.button)});
 });
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 canvas.addEventListener("wheel", e => {
   if (!connected) return;
   e.preventDefault();
-  send({type:"scroll", dx:0, dy: e.deltaY > 0 ? -3 : 3});
+  const dy = e.deltaY ? (e.deltaY > 0 ? -3 : 3) : 0;
+  const dx = e.deltaX ? (e.deltaX > 0 ? 3 : -3) : 0;
+  if (dx || dy) send({type:"scroll", dx, dy});
 }, {passive:false});
 
-/* touch: drag = move, tap = click, long-press = right click, 2-finger drag = scroll */
-let touchStart = null, longTimer = null, twoFingerY = null;
-canvas.addEventListener("touchstart", e => {
+/* ---------- touch ---------- */
+const HOLD_MS = 500, TAP_MS = 300, MOVE_PX = 8, SCROLL_PX = 10;
+let g = null;   // the gesture in progress
+const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+const mid = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+const buzz = () => { try { navigator.vibrate && navigator.vibrate(25); } catch (_) {} };
+
+function endGesture(){
+  if (!g) return;
+  clearTimeout(g.holdTimer);
+  if (g.dragging) { flushMoves(); send({type:"mouse_up", button:"left"}); }
+  g = null;
+}
+
+// touches on the Fit button are its own: never cancel its click
+const onButton = e => !!(e.target.closest && e.target.closest("button"));
+wrap.addEventListener("touchstart", e => {
+  if (onButton(e)) return;
   e.preventDefault();
-  if (e.touches.length === 2) { twoFingerY = e.touches[0].clientY; return; }
-  const p = posFromEvent(e);
-  touchStart = {p, t: Date.now(), moved:false};
-  send({type:"mouse_move", x:p.x, y:p.y});
-  longTimer = setTimeout(() => {
-    if (touchStart && !touchStart.moved) {
-      send({type:"mouse_down", x:p.x, y:p.y, button:"right"});
-      send({type:"mouse_up", button:"right"});
-      touchStart.longFired = true;
-    }
-  }, 550);
+  if (!connected) return;
+  if (e.touches.length >= 2) {
+    if (g && !g.two) endGesture();    // second finger: end the one-finger gesture
+    if (g && g.two) return;
+    const [a, b] = e.touches;
+    g = { two: true, kind: null, d0: dist(a, b), m0: mid(a, b), last: mid(a, b), sx: 0, sy: 0,
+          s0: view.s, tx0: view.tx, ty0: view.ty, t: Date.now(), moved: false };
+    return;
+  }
+  if (g) return;
+  const t = e.touches[0];
+  g = { two: false, x0: t.clientX, y0: t.clientY, lx: t.clientX, ly: t.clientY, t: Date.now(),
+        moved: false, held: false, dragging: false, p: null };
+  if (touchMode === "direct") {
+    g.p = posFromClient(t.clientX, t.clientY);
+    moveAbs(g.p); setLocalCursor(g.p.x, g.p.y);
+  }
+  g.holdTimer = setTimeout(() => { if (g && !g.two && !g.moved) { g.held = true; buzz(); } }, HOLD_MS);
 }, {passive:false});
-canvas.addEventListener("touchmove", e => {
+
+wrap.addEventListener("touchmove", e => {
+  if (onButton(e) && !g) return;
   e.preventDefault();
-  if (e.touches.length === 2) {
-    const y = e.touches[0].clientY;
-    if (twoFingerY !== null && Math.abs(y - twoFingerY) > 24) {
-      send({type:"scroll", dx:0, dy: y < twoFingerY ? -3 : 3});
-      twoFingerY = y;
+  if (!g) return;
+  if (g.two) {
+    if (e.touches.length < 2) return;
+    const [a, b] = e.touches, d = dist(a, b), m = mid(a, b);
+    if (!g.kind) {
+      if (Math.abs(d - g.d0) > 24) g.kind = "pinch";
+      else if (Math.hypot(m.x - g.m0.x, m.y - g.m0.y) > 12) g.kind = "scroll";
+      if (g.kind) { g.moved = true; g.last = m; }
+    }
+    if (g.kind === "pinch") {
+      // keep the point under the fingers' midpoint under it while zooming
+      const r = wrap.getBoundingClientRect();
+      const s = clamp(g.s0 * d / g.d0, 1, 5);
+      const px = (g.m0.x - r.left - g.tx0) / g.s0, py = (g.m0.y - r.top - g.ty0) / g.s0;
+      view.s = s; view.tx = m.x - r.left - px * s; view.ty = m.y - r.top - py * s;
+      applyView();
+    } else if (g.kind === "scroll") {
+      g.sx += m.x - g.last.x; g.sy += m.y - g.last.y; g.last = m;
+      const ny = Math.trunc(g.sy / SCROLL_PX), nx = Math.trunc(g.sx / SCROLL_PX);
+      if (ny || nx) {
+        // content follows the fingers, like scrolling on the phone itself
+        send({type:"scroll", dx: -nx, dy: ny});
+        g.sy -= ny * SCROLL_PX; g.sx -= nx * SCROLL_PX;
+      }
     }
     return;
   }
-  const p = posFromEvent(e);
-  if (touchStart) {
-    const dx = Math.abs(p.x - touchStart.p.x), dy = Math.abs(p.y - touchStart.p.y);
-    if (dx > 0.01 || dy > 0.01) touchStart.moved = true;
+  const t = e.touches[0];
+  const dxp = t.clientX - g.lx, dyp = t.clientY - g.ly;
+  g.lx = t.clientX; g.ly = t.clientY;
+  if (!g.moved) {
+    if (Math.hypot(t.clientX - g.x0, t.clientY - g.y0) <= MOVE_PX) return;
+    g.moved = true;
+    clearTimeout(g.holdTimer);
+    if (g.held) {   // hold, then drag: press the left button and keep it down
+      g.dragging = true; flushMoves();
+      if (g.p) send({type:"mouse_down", x:g.p.x, y:g.p.y, button:"left"});
+      else send({type:"mouse_down", button:"left"});
+    }
   }
-  moveThrottled(p);
+  if (touchMode === "direct") {
+    const p = posFromClient(t.clientX, t.clientY);
+    moveAbs(p); setLocalCursor(p.x, p.y);
+  } else {
+    const r = canvas.getBoundingClientRect();
+    const accel = 1 + Math.min(2, Math.hypot(dxp, dyp) / 10);   // fast swipes go further
+    moveRel(dxp / r.width * accel, dyp / r.height * accel);
+  }
 }, {passive:false});
-canvas.addEventListener("touchend", e => {
+
+function touchEnd(e, cancelled){
+  if (onButton(e) && !g) return;
   e.preventDefault();
-  clearTimeout(longTimer);
-  twoFingerY = null;
-  if (!touchStart) return;
-  const dt = Date.now() - touchStart.t;
-  if (!touchStart.moved && !touchStart.longFired && dt < 350) {
-    const p = touchStart.p;
-    send({type:"mouse_down", x:p.x, y:p.y, button:"left"});
-    send({type:"mouse_up", button:"left"});
+  if (!g) return;
+  if (g.two) {
+    if (e.touches.length > 0) return;   // wait for every finger to lift
+    const tap = !g.moved && Date.now() - g.t < TAP_MS;
+    g = null;
+    if (tap && !cancelled) click("right", null);
+    return;
   }
-  touchStart = null;
-}, {passive:false});
-canvas.addEventListener("dblclick", e => {
-  if (!connected) return;
-  const p = posFromEvent(e);
-  send({type:"mouse_down", x:p.x, y:p.y, button:"left"});
-  send({type:"mouse_up", button:"left"});
-});
+  const { held, moved, dragging, t, p } = g;
+  endGesture();
+  if (cancelled || dragging) return;
+  if (held && !moved) click("right", p);
+  else if (!moved && Date.now() - t < TAP_MS) click("left", p);
+}
+wrap.addEventListener("touchend", e => touchEnd(e, false), {passive:false});
+wrap.addEventListener("touchcancel", e => touchEnd(e, true), {passive:false});
 
 /* ---------- keyboard ---------- */
 document.querySelectorAll("#keysBar button").forEach(b => {
   b.addEventListener("click", () => {
     if (b.dataset.key) send({type:"key", key:b.dataset.key});
     else if (b.dataset.combo) {
-      const parts = b.dataset.combo.split(",");
+      const parts = comboKeys(b.dataset.combo);
       send({type:"key", key:parts[parts.length-1], modifiers:parts.slice(0,-1)});
     }
   });
@@ -247,33 +432,57 @@ function sendTypeBox(){
 $("sendTextBtn").onclick = sendTypeBox;
 $("typeBox").addEventListener("keydown", e => { if (e.key === "Enter") sendTypeBox(); });
 
-$("kbBtn").onclick = () => { $("kbSink").value = ""; $("kbSink").focus(); };
+/* phone keyboard: the field always holds two spaces, so a backspace on an
+   "empty" field still shows up as a shorter value (phone keyboards often do
+   not report Backspace as a key) */
+const SENTINEL = "  ";
+function resetSink(){
+  const k = $("kbSink"); k.value = SENTINEL;
+  try { k.setSelectionRange(SENTINEL.length, SENTINEL.length); } catch (_) {}
+}
+$("kbBtn").onclick = () => { resetSink(); $("kbSink").focus(); };
 $("kbSink").addEventListener("input", e => {
   const v = e.target.value;
-  if (v) { send({type:"text", text:v}); e.target.value = ""; }
+  if (v.length < SENTINEL.length) {
+    for (let i = v.length; i < SENTINEL.length; i++) send({type:"key", key:"backspace"});
+  } else if (v.startsWith(SENTINEL) && v.length > SENTINEL.length) {
+    send({type:"text", text:v.slice(SENTINEL.length)});
+  }
+  resetSink();
 });
 $("kbSink").addEventListener("keydown", e => {
-  if (e.key === "Backspace") send({type:"key", key:"backspace"});
-  if (e.key === "Enter") send({type:"key", key:"enter"});
+  if (e.key === "Enter") { e.preventDefault(); send({type:"key", key:"enter"}); }
 });
 
-/* physical keyboard capture when the canvas area was last clicked */
+/* physical keyboard capture when the screen was last clicked */
+const KEY_NAMES = {
+  " ": "space", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+  Escape: "esc", PageUp: "pageup", PageDown: "pagedown", Meta: "cmd", OS: "cmd",
+};
+const MODIFIER_ONLY = new Set(["Shift", "Control", "Alt", "AltGraph", "Meta", "OS",
+                               "Dead", "Unidentified", "Process"]);
 let kbCapture = false;
 canvas.addEventListener("mousedown", () => { kbCapture = true; });
 document.addEventListener("keydown", e => {
   if (!connected || !kbCapture) return;
-  if (document.activeElement === $("typeBox") || document.activeElement === $("token")) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT")) return;
+  if (MODIFIER_ONLY.has(e.key)) return;   // sent with the key they modify
+  e.preventDefault();
+  const altGr = e.getModifierState && e.getModifierState("AltGraph");
+  // a printable character with no shortcut modifier: type it as text, which
+  // also gets Shift and AltGr characters (e.g. @ on a German keyboard) right
+  if (e.key.length === 1 && (altGr || (!e.ctrlKey && !e.altKey && !e.metaKey))) {
+    send({type:"text", text:e.key}); return;
+  }
   const mods = [];
   if (e.ctrlKey) mods.push("ctrl");
   if (e.altKey) mods.push("alt");
   if (e.shiftKey) mods.push("shift");
   if (e.metaKey) mods.push("cmd");
-  let key = e.key;
-  if (key === " ") key = "space";
-  if (key.length === 1 && mods.length === 0) { send({type:"text", text:key}); return; }
+  let key = KEY_NAMES[e.key] || e.key;
   if (key.length === 1) key = key.toLowerCase();
-  send({type:"key", key:key, modifiers:mods});
-  if (["tab","alt"].includes(key.toLowerCase()) || mods.length) e.preventDefault();
+  send({type:"key", key:key.toLowerCase(), modifiers:mods});
 });
 </script>
 </body>

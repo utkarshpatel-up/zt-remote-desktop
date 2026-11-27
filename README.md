@@ -54,13 +54,25 @@ the token can control the computer. To change it, edit that file and restart.
 ## 4. Using it
 
 - **Mouse (desktop browser):** move / click / right-click / scroll as normal.
-- **Touch (phone):** drag = move mouse · quick tap = click · press & hold =
-  right-click · two-finger drag = scroll · double-tap also clicks.
+  Click the screen once and your physical keyboard types on the computer
+  (arrows, Esc, shortcuts included).
+- **Touch (phone)**, two modes (the **Touch** menu; your choice is remembered):
+  - **Trackpad** (default): drag anywhere to move the pointer, like a laptop
+    trackpad · tap = click where the pointer is · two-finger tap = right-click.
+  - **Direct**: the pointer jumps to your finger · tap = click there.
+  - In both: press & hold = right-click · press & hold, then drag = drag
+    (move windows, select text) · two-finger drag = scroll (up/down and
+    sideways) · pinch = zoom in, **Fit screen** zooms back out. While zoomed
+    in trackpad mode the view follows the pointer.
+- The pointer is drawn on the picture, so you can see where it is.
 - **Keys bar:** Esc, Tab, Enter, Win/⌘, Ctrl+C / Ctrl+V / Ctrl+Z, Alt+Tab, arrows.
+  When the computer is a Mac they become ⌘C / ⌘V / ⌘Z / ⌘Tab.
 - **Type box:** write text and Send to type it on the computer. The
-  "Phone keyboard" button summons your phone keyboard for live typing.
+  "Phone keyboard" button summons your phone keyboard for live typing
+  (backspace and Enter included).
 - **Quality / Width / FPS:** lower them if the picture lags (ZeroTier direct
-  connections handle 1280px @ 12 FPS / quality 60 comfortably).
+  connections handle 1280px @ 12 FPS / quality 60 comfortably). A still
+  screen sends nothing, so an idle computer uses almost no bandwidth.
 
 ## 5. Run at startup (optional)
 
@@ -75,10 +87,12 @@ the token can control the computer. To change it, edit that file and restart.
   devices and that you're using the computer's ZeroTier IP, not its Wi-Fi IP.
   Windows may ask to allow Python through the firewall the first time — allow
   it for private networks.
-- **"No ZeroTier interface found" warning:** the agent falls back to all
-  interfaces (token still required). Connect ZeroTier and restart the agent
-  to bind to ZeroTier only. You can also force an address:
-  `python agent.py --bind 10.147.20.5`
+- **"Waiting for ZeroTier to connect...":** the agent listens only on
+  ZeroTier, so it waits until ZeroTier is up (normal right after login) and
+  then starts by itself. If it keeps waiting, check the ZeroTier app shows
+  the computer as Connected. You can force an address with
+  `python agent.py --bind 10.147.20.5`, or listen on every network
+  (token still required) with `--bind all`.
 - **Black screen on Mac:** Screen Recording permission is missing (step 2).
 - **Screen visible but clicks do nothing on Mac:** Accessibility permission
   is missing (step 2).
@@ -90,6 +104,10 @@ the token can control the computer. To change it, edit that file and restart.
 `python agent.py --demo` streams an animated test pattern and logs input
 instead of controlling anything — handy for checking the phone connection
 before granting permissions.
+
+`python test_client.py http://<ip>:8765 <token>` checks the protocol against a
+running agent. With an agent started as `--demo --demo-still`, add `--still`
+to also check that an unchanged screen is not sent again.
 
 ## How it works
 
