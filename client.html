@@ -10,7 +10,7 @@
   body { margin:0; font-family: system-ui, sans-serif; background:#0e1116; color:#e6ebf2; }
   header { padding:10px 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; background:#151a22; }
   header h1 { font-size:15px; margin:0 8px 0 0; font-weight:600; }
-  input[type=password], input[type=text] { background:#0e1116; border:1px solid #2c3542; color:#e6ebf2;
+  input[type=password], input[type=text], input[type=email] { background:#0e1116; border:1px solid #2c3542; color:#e6ebf2;
     border-radius:8px; padding:8px 10px; font-size:14px; }
   button { background:#2456a6; border:0; color:#fff; border-radius:8px; padding:8px 12px; font-size:14px; }
   button.secondary { background:#232b36; }
@@ -34,7 +34,13 @@
 <body>
 <header>
   <h1>ZT Remote Desktop</h1>
-  <input id="token" type="password" placeholder="Access token" autocomplete="off">
+  <select id="method" class="hidden" aria-label="Sign in with">
+    <option value="av_backup">AV Backup account</option>
+    <option value="token">Access password</option>
+  </select>
+  <input id="email" class="hidden" type="email" placeholder="AV Backup e-mail" autocomplete="username">
+  <input id="avPassword" class="hidden" type="password" placeholder="AV Backup password" autocomplete="current-password">
+  <input id="token" type="password" placeholder="Access password" autocomplete="off">
   <button id="connectBtn">Connect</button>
   <button id="disconnectBtn" class="secondary hidden">Disconnect</button>
   <span id="status">Not connected</span>
@@ -100,6 +106,36 @@ let ws = null, connected = false, platform = "windows";
 let screenW = 0, screenH = 0;
 
 $("token").value = localStorage.getItem("zt_token") || "";
+$("email").value = localStorage.getItem("zt_email") || "";
+
+/* ---------- sign-in method: AV Backup account or the PC's access password ---------- */
+let method = "token";
+function showMethod(){
+  const av = method === "av_backup";
+  $("email").classList.toggle("hidden", !av);
+  $("avPassword").classList.toggle("hidden", !av);
+  $("token").classList.toggle("hidden", av);
+}
+$("method").addEventListener("change", e => {
+  method = e.target.value; localStorage.setItem("zt_method", method); showMethod();
+});
+fetch("/health").then(r => r.json()).then(h => {
+  if (!h.av_backup) return;           // PC has no AV Backup server set: password only
+  $("method").classList.remove("hidden");
+  method = localStorage.getItem("zt_method") || "av_backup";
+  $("method").value = method;
+  showMethod();
+}).catch(() => {});
+const AUTH_ERRORS = {
+  wrong_password: "Wrong access password — check the password shown on the PC",
+  wrong_credentials: "Wrong AV Backup e-mail or password",
+  not_member: "This AV Backup account is not an active team member",
+  role_not_allowed: "Your AV Backup role is not allowed to control this PC",
+  server_unreachable: "The AV Backup team server could not be reached — use the access password",
+  server_error: "The AV Backup team server gave an error — use the access password",
+  av_backup_not_set_up: "AV Backup login is not set up on this PC — use the access password",
+  too_many_attempts: "Too many wrong tries — wait a minute and try again",
+};
 
 function setStatus(t){ $("status").textContent = t; }
 function send(obj){ if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -203,14 +239,24 @@ function drawImage(img){
 }
 
 $("connectBtn").onclick = () => {
-  const token = $("token").value.trim();
-  if (!token) { setStatus("Enter the access token shown on the PC"); return; }
-  localStorage.setItem("zt_token", token);
+  let auth;
+  if (method === "av_backup") {
+    const email = $("email").value.trim(), password = $("avPassword").value;
+    if (!email || !password) { setStatus("Enter your AV Backup e-mail and password"); return; }
+    localStorage.setItem("zt_email", email);   // the password is never stored
+    auth = {type:"auth", method:"av_backup", email, password};
+  } else {
+    const token = $("token").value.trim();
+    if (!token) { setStatus("Enter the access password shown on the PC"); return; }
+    localStorage.setItem("zt_token", token);
+    auth = {type:"auth", token};
+  }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  let authFailed = false;
   ws = new WebSocket(proto + "//" + location.host + "/ws");
   ws.binaryType = "blob";
   setStatus("Connecting…");
-  ws.onopen = () => send({type:"auth", token});
+  ws.onopen = () => send(auth);
   ws.onmessage = ev => {
     if (typeof ev.data === "string") {
       const m = JSON.parse(ev.data);
@@ -223,7 +269,8 @@ $("connectBtn").onclick = () => {
         $("disconnectBtn").classList.remove("hidden");
         sendConfig();
       } else if (m.type === "auth_failed") {
-        setStatus("Wrong token — check the token on the PC");
+        setStatus(AUTH_ERRORS[m.reason] || AUTH_ERRORS.wrong_password);
+        authFailed = true;
         ws.close();
       } else if (m.type === "meta") {
         screenW = m.screen_w; screenH = m.screen_h;
@@ -241,7 +288,7 @@ $("connectBtn").onclick = () => {
   ws.onclose = () => {
     connected = false;
     endGesture();
-    setStatus("Disconnected");
+    if (!authFailed) setStatus("Disconnected");
     $("connectBtn").classList.remove("hidden");
     $("disconnectBtn").classList.add("hidden");
   };

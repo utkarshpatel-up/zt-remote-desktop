@@ -5,8 +5,9 @@ ZT Remote Desktop - PC/Mac agent.
 Streams the screen over a WebSocket and accepts mouse/keyboard input from
 the bundled web client. Designed to run on a ZeroTier network: by default it
 binds ONLY to the ZeroTier interface address, so it is never reachable from
-the public internet or the local LAN. Every connection must present the
-access token from the config file.
+the public internet or the local LAN. Every connection must either present
+the access password (the "token" in the config file) or sign in with an
+AV Backup team account, checked live against the team's PocketBase server.
 
 Works on Windows and macOS (and Linux for testing). Heavy dependencies
 (mss, pynput, psutil, Pillow) are imported lazily so `--demo` mode can run
@@ -28,10 +29,18 @@ import time
 
 from aiohttp import web, WSMsgType
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # standalone build (PyInstaller): config lives next to the .exe / binary,
+    # client.html is unpacked with the program
+    HERE = os.path.dirname(os.path.abspath(sys.executable))
+    RES_DIR = getattr(sys, "_MEIPASS", HERE)
+else:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    RES_DIR = HERE
 CONFIG_PATH = os.path.join(HERE, "zt-remote-config.json")
-CLIENT_HTML = os.path.join(HERE, "client.html")
+CLIENT_HTML = os.path.join(RES_DIR, "client.html")
 DEFAULT_PORT = 8765
+DEFAULT_ROLES = ["admin", "operator"]
 
 
 # --------------------------------------------------------------------------
@@ -39,18 +48,147 @@ DEFAULT_PORT = 8765
 # --------------------------------------------------------------------------
 
 def load_config():
+    cfg = {}
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            if cfg.get("token") and cfg.get("port"):
-                return cfg
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                cfg = loaded
         except Exception:
-            pass
-    cfg = {"token": secrets.token_urlsafe(24), "port": DEFAULT_PORT}
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+            cfg = {}
+    before = dict(cfg)
+    if not isinstance(cfg.get("token"), str) or not cfg["token"].strip():
+        cfg["token"] = secrets.token_urlsafe(24)
+    if not isinstance(cfg.get("port"), int):
+        cfg["port"] = DEFAULT_PORT
+    if not isinstance(cfg.get("av_backup_server"), str):
+        cfg["av_backup_server"] = ""     # "" = use the AV Backup app's setting if installed
+    if not isinstance(cfg.get("av_backup_roles"), list):
+        cfg["av_backup_roles"] = list(DEFAULT_ROLES)
+    if cfg != before:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
     return cfg
+
+
+# --------------------------------------------------------------------------
+# AV Backup team accounts (PocketBase on the office server, over ZeroTier)
+# --------------------------------------------------------------------------
+
+def _av_backup_config_dirs():
+    """Where the AV Backup desktop app keeps sync-config.json (Electron userData)."""
+    names = ["AV Backup", "av-backup"]
+    home = os.path.expanduser("~")
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return [os.path.join(base, n) for n in names]
+
+
+def normalize_server_url(url):
+    """'10.7.0.5:8090' -> 'http://10.7.0.5:8090'. Returns '' when unusable."""
+    from urllib.parse import urlsplit
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "http://" + url
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return ""
+    return url
+
+
+def find_av_backup_server(cfg):
+    """Server from our config first, else from the AV Backup app on this PC."""
+    url = normalize_server_url(cfg.get("av_backup_server"))
+    if url:
+        return url, "zt-remote-config.json"
+    for d in _av_backup_config_dirs():
+        try:
+            with open(os.path.join(d, "sync-config.json"), "r", encoding="utf-8") as f:
+                url = normalize_server_url(json.load(f).get("serverUrl"))
+            if url:
+                return url, "AV Backup app"
+        except Exception:
+            continue
+    return "", ""
+
+
+class AuthError(Exception):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+async def verify_av_backup(server, email, password, roles, timeout=15):
+    """Sign in to the AV Backup team server; returns the member's display name.
+
+    Only active members (avb_members) with one of `roles` are let in, checked
+    live on every login, so removing someone in the dashboard locks them out.
+    The password is sent to the team server only, never stored or logged.
+    """
+    import aiohttp
+    t = aiohttp.ClientTimeout(total=timeout)
+    try:
+        async with aiohttp.ClientSession(timeout=t) as s:
+            async with s.post(f"{server}/api/collections/users/auth-with-password",
+                              json={"identity": email, "password": password},
+                              allow_redirects=False) as r:
+                if r.status in (400, 401, 403, 404):
+                    raise AuthError("wrong_credentials")
+                if r.status != 200:
+                    raise AuthError("server_error")
+                body = await r.json(content_type=None)
+            token = body.get("token") if isinstance(body, dict) else None
+            if not isinstance(token, str) or not token:
+                raise AuthError("server_error")
+            async with s.post(f"{server}/api/avb/rpc/avb_me", json={},
+                              headers={"Authorization": token},
+                              allow_redirects=False) as r:
+                if r.status in (401, 403):
+                    raise AuthError("not_member")
+                if r.status != 200:
+                    raise AuthError("server_error")
+                me = await r.json(content_type=None)
+    except AuthError:
+        raise
+    except Exception:
+        raise AuthError("server_unreachable")
+    role = me.get("role") if isinstance(me, dict) else None
+    if role not in roles:
+        raise AuthError("role_not_allowed")
+    return str(me.get("display_name") or email)
+
+
+class LoginLimiter:
+    """Slows down password guessing: 5 failures from one address -> 60 s wait."""
+
+    def __init__(self, max_fails=5, window=300, lockout=60):
+        self.max_fails, self.window, self.lockout = max_fails, window, lockout
+        self.fails = {}      # ip -> [timestamps]
+        self.locked = {}     # ip -> until
+
+    def blocked(self, ip):
+        return self.locked.get(ip, 0) > time.monotonic()
+
+    def failed(self, ip):
+        now = time.monotonic()
+        recent = [t for t in self.fails.get(ip, []) if now - t < self.window]
+        recent.append(now)
+        self.fails[ip] = recent
+        if len(recent) >= self.max_fails:
+            self.locked[ip] = now + self.lockout
+            self.fails[ip] = []
+
+    def ok(self, ip):
+        self.fails.pop(ip, None)
 
 
 # --------------------------------------------------------------------------
@@ -346,12 +484,14 @@ def _num(value, default, lo, hi):
     return min(hi, max(lo, v))
 
 
-def build_app(cfg, demo=False, demo_still=False):
+def build_app(cfg, demo=False, demo_still=False, av_server=""):
     capture = DemoCapture() if demo else RealCapture()
     if demo:
         capture.paused = demo_still
     controller = DemoInput(capture) if demo else RealInput()
     token = cfg["token"]
+    roles = [r for r in cfg.get("av_backup_roles", DEFAULT_ROLES) if isinstance(r, str)]
+    limiter = LoginLimiter()
 
     app = web.Application()
 
@@ -359,7 +499,8 @@ def build_app(cfg, demo=False, demo_still=False):
         return web.FileResponse(CLIENT_HTML)
 
     async def health(request):
-        return web.json_response({"ok": True, "demo": demo})
+        return web.json_response({"ok": True, "demo": demo,
+                                  "av_backup": bool(av_server)})
 
     async def ws_handler(request):
         # heartbeat: notice a phone that dropped off ZeroTier even when the
@@ -373,18 +514,43 @@ def build_app(cfg, demo=False, demo_still=False):
         except asyncio.TimeoutError:
             await ws.close()
             return ws
-        authed = False
-        if first.type == WSMsgType.TEXT:
+        ip = request.remote or "?"
+        who, reason = None, "wrong_password"
+        if limiter.blocked(ip):
+            reason = "too_many_attempts"
+        elif first.type == WSMsgType.TEXT:
             try:
                 msg = json.loads(first.data)
-                authed = msg.get("type") == "auth" and hmac.compare_digest(
-                    str(msg.get("token", "")), token)
             except Exception:
-                authed = False
-        if not authed:
-            await ws.send_json({"type": "auth_failed"})
+                msg = None
+            if isinstance(msg, dict) and msg.get("type") == "auth":
+                if msg.get("method") == "av_backup":
+                    email = str(msg.get("email", "")).strip()
+                    password = str(msg.get("password", ""))
+                    if not av_server:
+                        reason = "av_backup_not_set_up"
+                    elif not email or not password:
+                        reason = "wrong_credentials"
+                    else:
+                        try:
+                            who = await verify_av_backup(av_server, email, password, roles)
+                        except AuthError as e:
+                            reason = e.reason
+                elif hmac.compare_digest(str(msg.get("token", "")).encode(),
+                                         token.encode()):
+                    who = "access password"
+        if who is None:
+            if reason in ("wrong_password", "wrong_credentials", "not_member",
+                          "role_not_allowed"):
+                limiter.failed(ip)
+            print(f"[auth] refused {ip}: {reason}")
+            sys.stdout.flush()
+            await ws.send_json({"type": "auth_failed", "reason": reason})
             await ws.close()
             return ws
+        limiter.ok(ip)
+        print(f"[auth] {ip} connected ({who})")
+        sys.stdout.flush()
         await ws.send_json({"type": "auth_ok", "demo": demo,
                             "platform": PLATFORM})
 
@@ -499,11 +665,22 @@ def main():
                     help="with --demo: a still picture (tests that unchanged "
                          "frames are not resent)")
     ap.add_argument("--port", type=int, default=None)
+    ap.add_argument("--av-server", default=None,
+                    help="AV Backup team server address, e.g. http://10.7.0.5:8090 "
+                         "(saved in the config; default: read from the AV Backup app)")
     ap.add_argument("--bind", default="auto",
                     help="'auto' (ZeroTier interface only), 'all', or an IP")
     args = ap.parse_args()
 
     cfg = load_config()
+    if args.av_server is not None:
+        url = normalize_server_url(args.av_server)
+        if args.av_server.strip() and not url:
+            sys.exit(f"Not a valid server address: {args.av_server}")
+        cfg["av_backup_server"] = url
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    av_server, av_source = find_av_backup_server(cfg)
     port = args.port or cfg["port"]
     binds = resolve_bind(args.bind)
     zt_ips = find_zerotier_ips()
@@ -514,12 +691,19 @@ def main():
     print(f"  Listening on: {', '.join(f'{b}:{port}' for b in binds)}")
     for ip in zt_ips:
         print(f"  Open on your phone: http://{ip}:{port}")
-    print(f"  Access token: {cfg['token']}")
-    print("  (token is also saved in zt-remote-config.json - keep it private)")
+    print(f"  Access password: {cfg['token']}")
+    print("  (saved as \"token\" in zt-remote-config.json - keep it private)")
+    if av_server:
+        print(f"  AV Backup login: ON  ({av_server}, from {av_source})")
+        print(f"    allowed roles: {', '.join(cfg.get('av_backup_roles', DEFAULT_ROLES))}")
+    else:
+        print("  AV Backup login: OFF (AV Backup not found on this PC; run with")
+        print("    --av-server http://<team-server>:8090 to turn it on)")
     print("=" * 58)
     sys.stdout.flush()
 
-    web.run_app(build_app(cfg, demo=args.demo, demo_still=args.demo_still), host=binds, port=port,
+    web.run_app(build_app(cfg, demo=args.demo, demo_still=args.demo_still,
+                          av_server=av_server), host=binds, port=port,
                 print=None)
 
 
