@@ -36,6 +36,8 @@
 <body>
 <header>
   <h1>ZT Remote Desktop</h1>
+  <input id="hostAddr" class="hidden" type="text" inputmode="url" autocapitalize="off" autocorrect="off"
+         spellcheck="false" placeholder="Computer address, e.g. 10.147.20.5">
   <select id="method" class="hidden" aria-label="Sign in with">
     <option value="av_backup">AV Backup account</option>
     <option value="token">Access password</option>
@@ -122,13 +124,36 @@ function showMethod(){
 $("method").addEventListener("change", e => {
   method = e.target.value; localStorage.setItem("zt_method", method); showMethod();
 });
-fetch("/health").then(r => r.json()).then(h => {
-  if (!h.av_backup) return;           // PC has no AV Backup server set: password only
-  $("method").classList.remove("hidden");
-  method = localStorage.getItem("zt_method") || "av_backup";
+/* In the Android / iOS app the page is not served by the computer, so the
+   user types its ZeroTier address once (remembered). In a browser it is
+   simply the address the page came from. */
+const IN_APP = !!window.__TAURI__;
+function hostAddr(){
+  if (!IN_APP) return location.host;
+  let h = $("hostAddr").value.trim().replace(/^[a-z]+:\/\//i, "").replace(/\/.*$/, "");
+  if (h && !/:\d+$/.test(h) && !/^\[.*\]$/.test(h)) h += ":8765";
+  return h;
+}
+function useMethods(av){
+  $("method").classList.toggle("hidden", !av);
+  method = av ? (localStorage.getItem("zt_method") || "av_backup") : "token";
   $("method").value = method;
   showMethod();
-}).catch(() => {});
+}
+function probe(){
+  const h = hostAddr();
+  if (!h) return;
+  fetch((IN_APP ? "http://" + h : "") + "/health").then(r => r.json())
+    .then(x => useMethods(!!x.av_backup))   // no AV Backup server on that PC: password only
+    .catch(() => { if (IN_APP) useMethods(true); });
+}
+if (IN_APP) {
+  $("hostAddr").classList.remove("hidden");
+  $("hostAddr").value = localStorage.getItem("zt_host") || "";
+  $("hostAddr").addEventListener("change", () => { localStorage.setItem("zt_host", $("hostAddr").value.trim()); probe(); });
+  useMethods(true);
+}
+probe();
 const AUTH_ERRORS = {
   wrong_password: "Wrong access password — check the password shown on the PC",
   wrong_credentials: "Wrong AV Backup e-mail or password",
@@ -254,9 +279,13 @@ $("connectBtn").onclick = () => {
     localStorage.setItem("zt_token", token);
     auth = {type:"auth", token};
   }
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const host = hostAddr();
+  if (!host) { setStatus("Enter the computer's ZeroTier address"); return; }
+  if (IN_APP) localStorage.setItem("zt_host", $("hostAddr").value.trim());
+  const proto = !IN_APP && location.protocol === "https:" ? "wss:" : "ws:";
   let authFailed = false;
-  ws = new WebSocket(proto + "//" + location.host + "/ws");
+  try { ws = new WebSocket(proto + "//" + host + "/ws"); }
+  catch (_) { setStatus("That address doesn't look right"); return; }
   ws.binaryType = "blob";
   setStatus("Connecting…");
   ws.onopen = () => send(auth);

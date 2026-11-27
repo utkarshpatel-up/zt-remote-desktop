@@ -78,10 +78,12 @@ pub async fn run(host: Arc<Host>) {
 }
 
 async fn health(State(host): State<Arc<Host>>) -> impl IntoResponse {
-    Json(json!({
+    // readable by the Android / iOS viewer app (a different origin); says
+    // nothing secret: version and whether AV Backup sign-in is on
+    ([("access-control-allow-origin", "*")], Json(json!({
         "ok": true, "demo": host.opts.demo, "version": VERSION,
         "av_backup": !host.av_server().0.is_empty(),
-    }))
+    })))
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, ConnectInfo(addr): ConnectInfo<SocketAddr>,
