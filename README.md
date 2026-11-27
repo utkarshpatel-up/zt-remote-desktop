@@ -1,171 +1,140 @@
 # ZT Remote Desktop
 
-A small remote desktop that runs **only over your ZeroTier network** — the same
-network your AV Backup app already uses to sync devices. The computer you want
-to control runs the **agent**; you control it from your phone's browser.
-No cloud, no account, nothing exposed to the public internet.
+Control a Windows PC or a Mac from your phone, **only over your ZeroTier
+network** (the same network your AV Backup app uses). No cloud and no account
+service. Nothing is exposed to the public internet.
 
-- Live screen (JPEG stream), mouse + touch control, keyboard + special keys
-- Works on **Windows** and **macOS** computers
-- The agent binds **only to the computer's ZeroTier IP address**
+- Live screen, mouse/touch control, keyboard and special keys, all in the phone's browser
 - **Two ways to sign in:** your **AV Backup team account** (same e-mail and
-  password as in the AV Backup app), or the computer's **access password**
-  for people without an account
-- Works on computers **without AV Backup or Python** — download the
-  standalone program (see 2a)
+  password as in the AV Backup app), or the computer's **access password** for
+  people without an account
+- Works on computers **without AV Backup**: it's a normal app, nothing else to install
+- **Updates itself:** the app tells you when a new version is out, and
+  **Update now** installs it
+- Built with **Tauri 2 + Rust**, so Android and iOS apps can come later from the same code
 
-## 1. Before you start
+## 1. Download
 
-- ZeroTier installed and **joined to the same network** on the computer and
-  your phone (the same network ID you already use for the AV app).
-- Find the computer's ZeroTier IP: it's the `10.x.x.x` / `172.x.x.x` address
-  shown in the ZeroTier app on that computer (or at my.zerotier.com →
-  your network → the computer's node).
+From the [latest release](https://github.com/utkarshpatel-up/zt-remote-desktop/releases/latest):
 
-## 2a. Easiest: download the standalone program (no Python needed)
+| Computer | File | Notes |
+|---|---|---|
+| Windows (install) | `ZT-Remote-Desktop_<v>_x64-setup.exe` | Installs for your user, no admin rights. Updates from inside the app. |
+| Windows (portable) | `ZT-Remote-Desktop_<v>_Windows-Portable.zip` | Unzip anywhere and run `ZT Remote Desktop.exe`. Settings are kept next to the .exe. |
+| Mac (Apple Silicon and Intel) | `ZT-Remote-Desktop_<v>_universal.dmg` | Drag to Applications. First time: right-click → **Open**. |
 
-Every push to `main` builds ready-to-run programs in GitHub Actions
-(**Actions → Test and build → Artifacts**); version tags (`v1.1.0`) also
-publish them on the **Releases** page:
+The builds aren't code-signed by Microsoft or Apple:
+- **Windows:** SmartScreen may warn once: **More info → Run anyway**. Allow
+  it through the firewall (private networks) when Windows asks.
+- **Mac:** the app asks for two permissions in System Settings → Privacy &
+  Security: **Screen Recording** (to see the screen) and **Accessibility** (to
+  move the mouse and type). The app window has buttons that open both. Quit
+  and reopen the app after switching them on.
 
-- `ZT-Remote-Desktop-Windows.zip` → unzip, double-click `ZT-Remote-Desktop.exe`
-  (if SmartScreen warns: *More info → Run anyway*)
-- `ZT-Remote-Desktop-macOS-arm64.zip` (M1/M2/M3/M4) or `-intel.zip` → unzip,
-  then in Terminal: `xattr -d com.apple.quarantine ZT-Remote-Desktop && ./ZT-Remote-Desktop`
-  (the build is not signed by Apple). Grant Screen Recording and
-  Accessibility to Terminal as in step 2.
+## 2. Before you start
 
-The config file `zt-remote-config.json` is created next to the program.
-
-## 2b. Install from source (Python)
-
-### Windows
-1. Install Python 3.10+ from python.org — tick **"Add python.exe to PATH"**.
-2. Double-click `install.bat` (one time only).
-3. Double-click `start.bat` every time you want the agent running.
-
-### macOS
-1. Install Python 3.10+ (python.org or `brew install python`).
-2. In Terminal, in this folder: `./install-mac.sh` (one time only).
-3. To run: `./start-mac.sh`
-4. **Two permissions macOS will ask for** (System Settings → Privacy & Security):
-   - **Screen Recording** → enable for Terminal (or the app you run it from)
-   - **Accessibility** → enable for Terminal as well
-   Restart the agent after granting them.
+ZeroTier must be installed and **joined to the same network** on the computer
+and on your phone. The app listens only on the computer's ZeroTier address, so
+it waits ("Waiting for ZeroTier…") until ZeroTier is connected.
 
 ## 3. Connect from your phone
 
-1. Start the agent on the computer. It prints something like:
+1. Start the app on the computer. Its window shows the address, e.g.
+   `http://10.147.20.5:8765`.
+2. On your phone (with ZeroTier on), open that address in the browser.
+3. Sign in and tap **Connect**:
+   - **AV Backup account:** your AV Backup e-mail and password.
+   - **Access password:** the password shown in the app window. Use this if
+     you have no AV Backup account, or if the team server is off.
 
-   ```
-   Listening on: 10.147.20.5:8765
-   Open on your phone: http://10.147.20.5:8765
-   Access token: AbCdEf...
-   ```
-
-2. On your phone (ZeroTier connected), open that address in the browser.
-3. Sign in, tap **Connect**:
-   - **AV Backup account** — your AV Backup e-mail and password. Shown only
-     when the computer knows your team server (see below).
-   - **Access password** — the password printed by the agent. Use this when
-     you have no AV Backup account, or the team server is off.
+Closing the window keeps remote access running in the tray / menu bar. To stop
+it, use the tray icon → **Quit**. Tick **Start when I sign in** to have it
+always available.
 
 ### Access password
 
-Generated on first run and saved as `"token"` in `zt-remote-config.json`
-next to the agent. Keep it private — anyone on your ZeroTier network with it
-can control the computer. To change it (e.g. to something easier to type),
-edit `"token"` in that file and restart.
+Created on first run. You can show, copy, change or randomize it in the app.
+Anyone on your ZeroTier network with it can control the computer, so keep it
+private. After 5 wrong tries from one device, sign-in is blocked for a minute.
 
 ### AV Backup account sign-in
 
-The agent checks your e-mail and password live with the team's PocketBase
-server (the same one AV Backup syncs with) and lets you in only if your
-account is an **active team member** with an allowed role. Deactivate
-someone in the PocketBase dashboard and they can no longer connect. Your
-password goes to the team server only; it is never saved on the computer or
-in the phone browser.
+The app checks the e-mail and password live with the team's PocketBase server
+(the one AV Backup syncs with). It lets someone in only if their account is
+an **active team member** with an allowed role. Deactivate someone in the
+PocketBase dashboard and they can't connect any more. The password goes to the
+team server only and is never stored.
 
-- **AV Backup installed on this computer and team sync set up:** nothing to
-  do — the agent reads the server address from the app.
-- **AV Backup not on this computer:** give the address once, it is saved:
-  `ZT-Remote-Desktop --av-server http://10.7.0.5:8090` (or
-  `python agent.py --av-server ...`), or set `"av_backup_server"` in
-  `zt-remote-config.json`. `--av-server ""` turns it off again.
-- **Who may connect:** `"av_backup_roles"` in the config, default
-  `["admin", "operator"]`. Set `["admin"]` to allow admins only.
+**AV Backup itself needs no changes:** this uses the sign-in and membership
+check that the team server already has.
 
-After 5 wrong tries from one device, sign-in is blocked for a minute.
+- **If AV Backup is installed on this computer** with team sync set up,
+  nothing to do: the server address is read from it.
+- **If not,** type the team server address (e.g. `http://10.7.0.5:8090`) under
+  **AV Backup sign-in** and press Save.
+- **Who may connect:** admins and/or operators (both by default).
 
-## 4. Using it
+**"Connected now"** lists who is connected, and **Disconnect all** drops them.
 
-- **Mouse (desktop browser):** move / click / right-click / scroll as normal.
-  Click the screen once and your physical keyboard types on the computer
-  (arrows, Esc, shortcuts included).
-- **Touch (phone)**, two modes (the **Touch** menu; your choice is remembered):
-  - **Trackpad** (default): drag anywhere to move the pointer, like a laptop
-    trackpad · tap = click where the pointer is · two-finger tap = right-click.
-  - **Direct**: the pointer jumps to your finger · tap = click there.
-  - In both: press & hold = right-click · press & hold, then drag = drag
-    (move windows, select text) · two-finger drag = scroll (up/down and
-    sideways) · pinch = zoom in, **Fit screen** zooms back out. While zoomed
-    in trackpad mode the view follows the pointer.
-- The pointer is drawn on the picture, so you can see where it is.
-- **Keys bar:** Esc, Tab, Enter, Win/⌘, Ctrl+C / Ctrl+V / Ctrl+Z, Alt+Tab, arrows.
-  When the computer is a Mac they become ⌘C / ⌘V / ⌘Z / ⌘Tab.
-- **Type box:** write text and Send to type it on the computer. The
-  "Phone keyboard" button summons your phone keyboard for live typing
-  (backspace and Enter included).
-- **Quality / Width / FPS:** lower them if the picture lags (ZeroTier direct
-  connections handle 1280px @ 12 FPS / quality 60 comfortably). A still
-  screen sends nothing, so an idle computer uses almost no bandwidth.
+## 4. Using it on the phone
 
-## 5. Run at startup (optional)
+- **Touch:** two modes, chosen in the **Touch** menu:
+  - **Trackpad** (default): drag to move the pointer, tap to click.
+  - **Direct:** the pointer jumps to your finger.
+  - In both modes: press and hold = right-click · hold then drag = drag ·
+    two-finger drag = scroll · pinch = zoom (**Fit screen** zooms back out).
+- **Keys bar:** Esc, Tab, Enter, Win/⌘, copy, paste, undo, Alt+Tab and the
+  arrow keys. On a Mac these become ⌘C / ⌘V / ⌘Z / ⌘Tab.
+- **Type box** and the **Phone keyboard** button for typing text.
+- **Quality / Width / FPS:** lower them if the picture lags. A still screen
+  sends nothing.
 
-- **Windows:** press `Win+R`, type `shell:startup`, and drop a shortcut to
-  `start.bat` in that folder.
-- **macOS:** System Settings → General → Login Items → add `start-mac.sh`
-  (or run it from a terminal when needed).
+## 5. Updates
+
+- **Installed (Windows Setup or Mac app):** when a new version is out, the app
+  window shows **Update now**. It downloads the update, checks its signature,
+  installs it and restarts. Your password and settings are kept.
+- **Portable Windows copy:** the app shows that an update exists. Download
+  the new zip and replace the .exe.
+- The phone page also shows "Update available for this PC" when you connect.
 
 ## 6. Troubleshooting
 
-- **Page doesn't open on the phone:** check ZeroTier shows *Connected* on both
-  devices and that you're using the computer's ZeroTier IP, not its Wi-Fi IP.
-  Windows may ask to allow Python through the firewall the first time — allow
-  it for private networks.
-- **"Waiting for ZeroTier to connect...":** the agent listens only on
-  ZeroTier, so it waits until ZeroTier is up (normal right after login) and
-  then starts by itself. If it keeps waiting, check the ZeroTier app shows
-  the computer as Connected. You can force an address with
-  `python agent.py --bind 10.147.20.5`, or listen on every network
-  (token still required) with `--bind all`.
-- **Black screen on Mac:** Screen Recording permission is missing (step 2).
-- **Screen visible but clicks do nothing on Mac:** Accessibility permission
-  is missing (step 2).
-- **Wrong access password:** the one on the agent's console / `"token"` in
-  `zt-remote-config.json` is the source of truth.
-- **No "AV Backup account" option on the phone:** the agent didn't find the
-  team server — its console says `AV Backup login: OFF`. Use `--av-server`.
+- **Page doesn't open on the phone:** check that ZeroTier shows *Connected* on
+  both devices, and that you're using the ZeroTier address shown in the app,
+  not the Wi-Fi address.
+- **No "AV Backup account" choice on the phone:** AV Backup sign-in is off on
+  that computer. Enter the team server address in the app.
 - **"team server could not be reached":** the PocketBase computer is off or
   not on ZeroTier. The access password still works.
+- **Black screen, or clicks do nothing, on a Mac:** a permission is missing
+  (see section 1). After an update, macOS may ask for the permissions again.
 
-## 7. Test mode
+## For developers
 
-`python agent.py --demo` streams an animated test pattern and logs input
-instead of controlling anything — handy for checking the phone connection
-before granting permissions.
+```
+npm install                     # Tauri CLI
+npx tauri dev                   # run the app
+npx tauri build                 # installers for this OS
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-`python test_av_login.py` checks both sign-in methods against a fake team
-server (no network needed).
+On Linux, install the libraries listed in `.github/workflows/build.yml` first.
 
-`python test_client.py http://<ip>:8765 <token>` checks the protocol against a
-running agent. With an agent started as `--demo --demo-still`, add `--still`
-to also check that an unchanged screen is not sent again.
+- `src-tauri/src/host/`: the host, in Rust. The server (axum, HTTP and
+  WebSocket) is in `server.rs`; screen capture (`xcap` → JPEG) in
+  `capture.rs`; mouse and keyboard (`enigo`) in `input.rs`; sign-in in
+  `auth.rs`; the update notice in `update.rs`.
+- `src-tauri/src/app.rs`: the command line, the window and tray, and the in-app updater.
+- `ui/index.html`: the app window. `ui/viewer.html`: the phone page, served by
+  the host (and the starting point for a future Android/iOS viewer).
+- `--headless --demo` runs the server alone with a test pattern. The black-box
+  tests in `tests/` use it (`pip install aiohttp`, then
+  `python tests/test_av_login.py`, `tests/test_update.py`,
+  `tests/test_client.py <url> <password>`).
 
-## How it works
-
-`agent.py` (aiohttp) serves `client.html`, streams screen captures from
-`mss` as JPEG frames over an authenticated WebSocket (access password, or
-an AV Backup account verified with the team's PocketBase server), and injects input
-with `pynput`. Interface detection uses `psutil`. That's the whole design —
-one file each side, no database, no server in the middle.
+**Making a release:** bump `version` in `src-tauri/tauri.conf.json`,
+`src-tauri/Cargo.toml` and `package.json`, merge to `main`, then push a tag
+`v<version>`. CI builds all three packages, signs the update bundles with the
+`TAURI_SIGNING_PRIVATE_KEY` secret, publishes the release and `latest.json`,
+and installed apps then offer the update.

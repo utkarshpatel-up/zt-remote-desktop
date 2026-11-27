@@ -1,11 +1,12 @@
 name: Test and build
 
-# Every push / PR: tests + all packages as downloadable artifacts.
-# Push a tag v<VERSION> (matching VERSION in agent.py) to publish a release:
-#   1. Windows installer   ZT-Remote-Desktop-Setup-<v>.exe
-#   2. Windows portable    ZT-Remote-Desktop-Windows-Portable-<v>.zip
-#   3. macOS universal     ZT-Remote-Desktop-macOS-<v>.dmg  (Apple Silicon + Intel)
-# Running agents see the new release through their update check.
+# Every push / PR: tests, then the three packages as downloadable artifacts.
+# Push a tag v<version> (matching tauri.conf.json) to publish a release with:
+#   1. Windows installer   ZT-Remote-Desktop_<v>_x64-setup.exe
+#   2. Windows portable    ZT-Remote-Desktop_<v>_Windows-Portable.zip
+#   3. macOS universal     ZT-Remote-Desktop_<v>_universal.dmg  (Apple Silicon + Intel)
+# plus latest.json + signed update bundles, which installed apps use to
+# update themselves ("Update now" in the app).
 
 on:
   push:
@@ -17,34 +18,57 @@ on:
 permissions:
   contents: write   # publish the release on a v* tag
 
+env:
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - uses: actions/checkout@v5
       - id: v
-        name: Read version (and check it matches the tag)
+        name: Read version (all files agree, and match the tag)
         run: |
-          V=$(python -c "import re;print(re.search(r'^VERSION = \"(.+?)\"', open('agent.py').read(), re.M)[1])")
-          echo "version=$V" >> "$GITHUB_OUTPUT"
+          V=$(jq -r .version src-tauri/tauri.conf.json)
+          P=$(jq -r .version package.json)
+          C=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "tauri.conf.json=$V package.json=$P Cargo.toml=$C"
+          [ "$V" = "$P" ] && [ "$V" = "$C" ] || { echo "::error::versions differ"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$V" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION $V in agent.py"; exit 1
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $V"; exit 1
           fi
-      - run: pip install aiohttp Pillow
-      - name: Sign-in tests (fake AV Backup server)
-        run: python test_av_login.py
-      - name: Update-check tests (fake GitHub API)
-        run: python test_update.py
-      - name: Protocol test (demo agent)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - name: System libraries
         run: |
-          python agent.py --demo --bind 127.0.0.1 --port 8765 &
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libpipewire-0.3-dev libgbm-dev libegl-dev libxdo-dev clang
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - name: Rust unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Build
+        run: cargo build --manifest-path src-tauri/Cargo.toml
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.12" }
+      - run: pip install aiohttp
+      - name: Sign-in tests (fake AV Backup server)
+        run: python tests/test_av_login.py
+      - name: Update-notice tests (fake release feed)
+        run: python tests/test_update.py
+      - name: Protocol tests (demo mode, moving and still screen)
+        run: |
+          B=src-tauri/target/debug/zt-remote-desktop
+          mkdir -p c1 c2
+          $B --headless --demo --bind 127.0.0.1 --port 8765 --config-dir c1 &
+          $B --headless --demo --demo-still --bind 127.0.0.1 --port 8766 --config-dir c2 &
           sleep 3
-          python test_client.py http://127.0.0.1:8765 "$(python -c 'import json;print(json.load(open("zt-remote-config.json"))["token"])')"
+          python tests/test_client.py http://127.0.0.1:8765 "$(jq -r .token c1/zt-remote-config.json)"
+          python tests/test_client.py http://127.0.0.1:8766 "$(jq -r .token c2/zt-remote-config.json)" --still
 
   windows:
     needs: test
@@ -52,152 +76,120 @@ jobs:
     env:
       V: ${{ needs.test.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller
-      - name: Build exe
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npm ci || npm install
+      - run: npx tauri build --bundles nsis
+      - name: Smoke test the program
         shell: bash
         run: |
-          pyinstaller --onefile --name ZT-Remote-Desktop --add-data "client.html;." \
-            --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 agent.py
-      - name: Smoke test
-        shell: bash
-        run: |
-          cd dist
-          ./ZT-Remote-Desktop.exe --version
-          ./ZT-Remote-Desktop.exe --demo --bind 127.0.0.1 --port 8799 &
+          EXE=src-tauri/target/release/zt-remote-desktop.exe
+          mkdir -p smoke
+          "$EXE" --headless --demo --bind 127.0.0.1 --port 8799 --config-dir smoke &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8799/health && break; sleep 1; done
-          curl -sf http://127.0.0.1:8799/health | grep -q "\"version\": \"$V\""
+          curl -sf http://127.0.0.1:8799/health | grep -q "\"version\":\"$V\""
           curl -sf http://127.0.0.1:8799/ | grep -q "ZT Remote Desktop"
-          kill %1 || true; sleep 1
-          rm -f zt-remote-config.json
-      - name: Portable zip
+          taskkill //F //IM zt-remote-desktop.exe || true
+      - name: Collect installer, update signature and portable zip
         shell: bash
         run: |
           mkdir -p out portable
-          cp dist/ZT-Remote-Desktop.exe README.md portable/
-          cd portable && 7z a "../out/ZT-Remote-Desktop-Windows-Portable-$V.zip" . > /dev/null
-      - name: Installer (Inno Setup)
+          N=src-tauri/target/release/bundle/nsis
+          cp "$N/ZT Remote Desktop_${V}_x64-setup.exe"     "out/ZT-Remote-Desktop_${V}_x64-setup.exe"
+          cp "$N/ZT Remote Desktop_${V}_x64-setup.exe.sig" "out/ZT-Remote-Desktop_${V}_x64-setup.exe.sig"
+          cp src-tauri/target/release/zt-remote-desktop.exe "portable/ZT Remote Desktop.exe"
+          cp README.md portable/
+          cd portable && 7z a "../out/ZT-Remote-Desktop_${V}_Windows-Portable.zip" . > /dev/null
+      - name: Installer smoke test (silent install, uninstall)
         shell: pwsh
         run: |
-          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
-            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
-            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
-          }
-          iscc /Q "/DMyAppVersion=$env:V" packaging\windows\installer.iss
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: Installer smoke test (silent install, run, uninstall)
-        shell: pwsh
-        run: |
-          $setup = "out\ZT-Remote-Desktop-Setup-$env:V.exe"
-          Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
-          $exe = "$env:LOCALAPPDATA\Programs\ZT Remote Desktop\ZT-Remote-Desktop.exe"
-          if (-not (Test-Path $exe)) { throw "not installed" }
-          & $exe --version
-          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\ZT Remote Desktop\unins000.exe")) { throw "no uninstaller" }
-          Start-Process "$env:LOCALAPPDATA\Programs\ZT Remote Desktop\unins000.exe" -ArgumentList "/VERYSILENT" -Wait
-      - uses: actions/upload-artifact@v4
+          Start-Process "out\ZT-Remote-Desktop_$($env:V)_x64-setup.exe" -ArgumentList "/S" -Wait
+          $dir = "$env:LOCALAPPDATA\ZT Remote Desktop"
+          if (-not (Test-Path "$dir\zt-remote-desktop.exe")) { Get-ChildItem $env:LOCALAPPDATA | Select-Object -First 40; throw "not installed" }
+          if (-not (Test-Path "$dir\uninstall.exe")) { throw "no uninstaller (app would think it is portable)" }
+          Start-Process "$dir\uninstall.exe" -ArgumentList "/S" -Wait
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
           path: out/*
 
-  mac-build:
+  mac:
     needs: test
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest       # Apple Silicon
-            arch: arm64
-          - os: macos-15-intel     # Intel
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller
-      - name: Build
-        run: |
-          pyinstaller --onefile --name ZT-Remote-Desktop --add-data "client.html:." \
-            --hidden-import pynput.keyboard._darwin --hidden-import pynput.mouse._darwin agent.py
-          file dist/ZT-Remote-Desktop | grep -q "${{ matrix.arch }}"
-      - name: Smoke test
-        run: |
-          dist/ZT-Remote-Desktop --version
-          dist/ZT-Remote-Desktop --demo --bind 127.0.0.1 --port 8799 &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8799/health && break; sleep 1; done
-          curl -sf http://127.0.0.1:8799/ | grep -q "ZT Remote Desktop"
-          kill %1 || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mac-${{ matrix.arch }}
-          path: dist/ZT-Remote-Desktop
-
-  mac-dmg:
-    needs: [test, mac-build]
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       V: ${{ needs.test.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: mac-*
-      - name: Assemble universal app and DMG
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "aarch64-apple-darwin,x86_64-apple-darwin" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npm ci || npm install
+      - run: npx tauri build --target universal-apple-darwin --bundles app,dmg
+      - name: Check it is universal and runs
         run: |
-          APP="dmg/ZT Remote Desktop.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/arm64" "$APP/Contents/Resources/x86_64"
-          cp mac-arm64/ZT-Remote-Desktop  "$APP/Contents/Resources/arm64/"
-          cp mac-x86_64/ZT-Remote-Desktop "$APP/Contents/Resources/x86_64/"
-          chmod +x "$APP"/Contents/Resources/*/ZT-Remote-Desktop
-          cp packaging/mac/launcher.sh "$APP/Contents/MacOS/ZT Remote Desktop"
-          chmod +x "$APP/Contents/MacOS/ZT Remote Desktop"
-          sed "s/__VERSION__/$V/g" packaging/mac/Info.plist > "$APP/Contents/Info.plist"
-          plutil -lint "$APP/Contents/Info.plist"
-          codesign --force --sign - "$APP"
-          codesign --verify --verbose "$APP"
-          cp packaging/mac/READ-ME-FIRST.txt dmg/
-          ln -s /Applications dmg/Applications
+          B=src-tauri/target/universal-apple-darwin/release/bundle/macos
+          BIN="$B/ZT Remote Desktop.app/Contents/MacOS/zt-remote-desktop"
+          lipo -archs "$BIN" | tee /dev/stderr | grep -q "x86_64 arm64"
+          mkdir -p smoke
+          "$BIN" --headless --demo --bind 127.0.0.1 --port 8799 --config-dir smoke &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8799/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8799/health | grep -q "\"version\":\"$V\""
+          kill %1 || true
+      - name: Collect DMG and update bundle
+        run: |
           mkdir -p out
-          hdiutil create -volname "ZT Remote Desktop" -srcfolder dmg -ov -format UDZO "out/ZT-Remote-Desktop-macOS-$V.dmg"
-      - name: Smoke test the DMG
-        run: |
-          MNT=$(hdiutil attach -nobrowse "out/ZT-Remote-Desktop-macOS-$V.dmg" | tail -1 | cut -f3)
-          R="$MNT/ZT Remote Desktop.app/Contents/Resources"
-          file "$R/arm64/ZT-Remote-Desktop" | grep -q arm64
-          file "$R/x86_64/ZT-Remote-Desktop" | grep -q x86_64
-          "$R/arm64/ZT-Remote-Desktop" --version
-          hdiutil detach "$MNT"
-      - uses: actions/upload-artifact@v4
+          R=src-tauri/target/universal-apple-darwin/release/bundle
+          cp "$R/dmg/ZT Remote Desktop_${V}_universal.dmg" "out/ZT-Remote-Desktop_${V}_universal.dmg"
+          cp "$R/macos/ZT Remote Desktop.app.tar.gz"      "out/ZT-Remote-Desktop_${V}_universal.app.tar.gz"
+          cp "$R/macos/ZT Remote Desktop.app.tar.gz.sig"  "out/ZT-Remote-Desktop_${V}_universal.app.tar.gz.sig"
+      - uses: actions/upload-artifact@v5
         with:
-          name: mac-dmg
-          path: out/*.dmg
+          name: mac
+          path: out/*
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, mac-dmg]
-    runs-on: ubuntu-latest
+    needs: [test, windows, mac]
+    runs-on: ubuntu-24.04
+    env:
+      V: ${{ needs.test.outputs.version }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
-          pattern: "{windows,mac-dmg}"
+          path: out
           merge-multiple: true
-      - run: ls -l
+      - name: Write latest.json (what installed apps check for updates)
+        run: |
+          cd out
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${V}"
+          WIN="ZT-Remote-Desktop_${V}_x64-setup.exe"
+          MAC="ZT-Remote-Desktop_${V}_universal.app.tar.gz"
+          jq -n --arg v "$V" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg wsig "$(cat $WIN.sig)" --arg wurl "$BASE/$WIN" \
+            --arg msig "$(cat $MAC.sig)" --arg murl "$BASE/$MAC" \
+            '{version:$v, notes:"See the release page for what changed.", pub_date:$date, platforms:{
+               "windows-x86_64":{signature:$wsig, url:$wurl},
+               "darwin-aarch64":{signature:$msig, url:$murl},
+               "darwin-x86_64":{signature:$msig, url:$murl}}}' > latest.json
+          cat latest.json
+          ls -l
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            *.exe
-            *.zip
-            *.dmg
+          name: ZT Remote Desktop ${{ env.V }}
+          files: out/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
             ## Downloads
-            - **Windows (install):** `ZT-Remote-Desktop-Setup-*.exe`. Installs for your user only, no admin rights needed. To update later, run the newer Setup; your password and settings are kept.
-            - **Windows (portable):** `ZT-Remote-Desktop-Windows-Portable-*.zip`. Unzip anywhere and run `ZT-Remote-Desktop.exe`.
-            - **macOS (Apple Silicon and Intel):** `ZT-Remote-Desktop-macOS-*.dmg`. Drag the app to Applications. The first time, right-click it and choose Open.
+            - **Windows, install:** `ZT-Remote-Desktop_${{ env.V }}_x64-setup.exe`. Installs for your user only, no admin needed. Later updates install from inside the app (**Update now**).
+            - **Windows, portable:** `ZT-Remote-Desktop_${{ env.V }}_Windows-Portable.zip`. Unzip anywhere and run `ZT Remote Desktop.exe`. It keeps its settings next to the .exe and tells you when a new version is out.
+            - **macOS (Apple Silicon and Intel):** `ZT-Remote-Desktop_${{ env.V }}_universal.dmg`. Drag the app to Applications. The first time, right-click it and choose **Open**. Later updates install from inside the app.
 
-            Running agents check for new releases on their own and show an "Update available" notice on the PC and on the phone.
+            The builds aren't code-signed by Microsoft or Apple, so Windows SmartScreen may ask once (**More info → Run anyway**). Updates are signed with this project's own update key and checked before they install.
