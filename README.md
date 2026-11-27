@@ -7,8 +7,12 @@ No cloud, no account, nothing exposed to the public internet.
 
 - Live screen (JPEG stream), mouse + touch control, keyboard + special keys
 - Works on **Windows** and **macOS** computers
-- The agent binds **only to the computer's ZeroTier IP address** and every
-  connection needs the **access token** printed at startup
+- The agent binds **only to the computer's ZeroTier IP address**
+- **Two ways to sign in:** your **AV Backup team account** (same e-mail and
+  password as in the AV Backup app), or the computer's **access password**
+  for people without an account
+- Works on computers **without AV Backup or Python** — download the
+  standalone program (see 2a)
 
 ## 1. Before you start
 
@@ -18,7 +22,22 @@ No cloud, no account, nothing exposed to the public internet.
   shown in the ZeroTier app on that computer (or at my.zerotier.com →
   your network → the computer's node).
 
-## 2. Install on the computer you want to control
+## 2a. Easiest: download the standalone program (no Python needed)
+
+Every push to `main` builds ready-to-run programs in GitHub Actions
+(**Actions → Test and build → Artifacts**); version tags (`v1.1.0`) also
+publish them on the **Releases** page:
+
+- `ZT-Remote-Desktop-Windows.zip` → unzip, double-click `ZT-Remote-Desktop.exe`
+  (if SmartScreen warns: *More info → Run anyway*)
+- `ZT-Remote-Desktop-macOS-arm64.zip` (M1/M2/M3/M4) or `-intel.zip` → unzip,
+  then in Terminal: `xattr -d com.apple.quarantine ZT-Remote-Desktop && ./ZT-Remote-Desktop`
+  (the build is not signed by Apple). Grant Screen Recording and
+  Accessibility to Terminal as in step 2.
+
+The config file `zt-remote-config.json` is created next to the program.
+
+## 2b. Install from source (Python)
 
 ### Windows
 1. Install Python 3.10+ from python.org — tick **"Add python.exe to PATH"**.
@@ -45,11 +64,38 @@ No cloud, no account, nothing exposed to the public internet.
    ```
 
 2. On your phone (ZeroTier connected), open that address in the browser.
-3. Paste the **access token**, tap **Connect**.
+3. Sign in, tap **Connect**:
+   - **AV Backup account** — your AV Backup e-mail and password. Shown only
+     when the computer knows your team server (see below).
+   - **Access password** — the password printed by the agent. Use this when
+     you have no AV Backup account, or the team server is off.
 
-On first run the token is generated and saved in `zt-remote-config.json`
-next to `agent.py`. Keep it private — anyone on your ZeroTier network with
-the token can control the computer. To change it, edit that file and restart.
+### Access password
+
+Generated on first run and saved as `"token"` in `zt-remote-config.json`
+next to the agent. Keep it private — anyone on your ZeroTier network with it
+can control the computer. To change it (e.g. to something easier to type),
+edit `"token"` in that file and restart.
+
+### AV Backup account sign-in
+
+The agent checks your e-mail and password live with the team's PocketBase
+server (the same one AV Backup syncs with) and lets you in only if your
+account is an **active team member** with an allowed role. Deactivate
+someone in the PocketBase dashboard and they can no longer connect. Your
+password goes to the team server only; it is never saved on the computer or
+in the phone browser.
+
+- **AV Backup installed on this computer and team sync set up:** nothing to
+  do — the agent reads the server address from the app.
+- **AV Backup not on this computer:** give the address once, it is saved:
+  `ZT-Remote-Desktop --av-server http://10.7.0.5:8090` (or
+  `python agent.py --av-server ...`), or set `"av_backup_server"` in
+  `zt-remote-config.json`. `--av-server ""` turns it off again.
+- **Who may connect:** `"av_backup_roles"` in the config, default
+  `["admin", "operator"]`. Set `["admin"]` to allow admins only.
+
+After 5 wrong tries from one device, sign-in is blocked for a minute.
 
 ## 4. Using it
 
@@ -96,14 +142,21 @@ the token can control the computer. To change it, edit that file and restart.
 - **Black screen on Mac:** Screen Recording permission is missing (step 2).
 - **Screen visible but clicks do nothing on Mac:** Accessibility permission
   is missing (step 2).
-- **Wrong token:** the token on the agent's console / in
+- **Wrong access password:** the one on the agent's console / `"token"` in
   `zt-remote-config.json` is the source of truth.
+- **No "AV Backup account" option on the phone:** the agent didn't find the
+  team server — its console says `AV Backup login: OFF`. Use `--av-server`.
+- **"team server could not be reached":** the PocketBase computer is off or
+  not on ZeroTier. The access password still works.
 
 ## 7. Test mode
 
 `python agent.py --demo` streams an animated test pattern and logs input
 instead of controlling anything — handy for checking the phone connection
 before granting permissions.
+
+`python test_av_login.py` checks both sign-in methods against a fake team
+server (no network needed).
 
 `python test_client.py http://<ip>:8765 <token>` checks the protocol against a
 running agent. With an agent started as `--demo --demo-still`, add `--still`
@@ -112,6 +165,7 @@ to also check that an unchanged screen is not sent again.
 ## How it works
 
 `agent.py` (aiohttp) serves `client.html`, streams screen captures from
-`mss` as JPEG frames over a token-authenticated WebSocket, and injects input
+`mss` as JPEG frames over an authenticated WebSocket (access password, or
+an AV Backup account verified with the team's PocketBase server), and injects input
 with `pynput`. Interface detection uses `psutil`. That's the whole design —
 one file each side, no database, no server in the middle.
