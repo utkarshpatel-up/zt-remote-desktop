@@ -1,5 +1,12 @@
 name: Test and build
 
+# Every push / PR: tests + all packages as downloadable artifacts.
+# Push a tag v<VERSION> (matching VERSION in agent.py) to publish a release:
+#   1. Windows installer   ZT-Remote-Desktop-Setup-<v>.exe
+#   2. Windows portable    ZT-Remote-Desktop-Windows-Portable-<v>.zip
+#   3. macOS universal     ZT-Remote-Desktop-macOS-<v>.dmg  (Apple Silicon + Intel)
+# Running agents see the new release through their update check.
+
 on:
   push:
     branches: [main]
@@ -13,35 +20,99 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - id: v
+        name: Read version (and check it matches the tag)
+        run: |
+          V=$(python -c "import re;print(re.search(r'^VERSION = \"(.+?)\"', open('agent.py').read(), re.M)[1])")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$V" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION $V in agent.py"; exit 1
+          fi
       - run: pip install aiohttp Pillow
       - name: Sign-in tests (fake AV Backup server)
         run: python test_av_login.py
+      - name: Update-check tests (fake GitHub API)
+        run: python test_update.py
       - name: Protocol test (demo agent)
         run: |
           python agent.py --demo --bind 127.0.0.1 --port 8765 &
           sleep 3
           python test_client.py http://127.0.0.1:8765 "$(python -c 'import json;print(json.load(open("zt-remote-config.json"))["token"])')"
 
-  build:
+  windows:
+    needs: test
+    runs-on: windows-latest
+    env:
+      V: ${{ needs.test.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Build exe
+        shell: bash
+        run: |
+          pyinstaller --onefile --name ZT-Remote-Desktop --add-data "client.html;." \
+            --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 agent.py
+      - name: Smoke test
+        shell: bash
+        run: |
+          cd dist
+          ./ZT-Remote-Desktop.exe --version
+          ./ZT-Remote-Desktop.exe --demo --bind 127.0.0.1 --port 8799 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8799/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8799/health | grep -q "\"version\": \"$V\""
+          curl -sf http://127.0.0.1:8799/ | grep -q "ZT Remote Desktop"
+          kill %1 || true; sleep 1
+          rm -f zt-remote-config.json
+      - name: Portable zip
+        shell: bash
+        run: |
+          mkdir -p out portable
+          cp dist/ZT-Remote-Desktop.exe README.md portable/
+          cd portable && 7z a "../out/ZT-Remote-Desktop-Windows-Portable-$V.zip" . > /dev/null
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+            $env:PATH += ";${env:ProgramFiles(x86)}\Inno Setup 6"
+          }
+          iscc /Q "/DMyAppVersion=$env:V" packaging\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Installer smoke test (silent install, run, uninstall)
+        shell: pwsh
+        run: |
+          $setup = "out\ZT-Remote-Desktop-Setup-$env:V.exe"
+          Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          $exe = "$env:LOCALAPPDATA\Programs\ZT Remote Desktop\ZT-Remote-Desktop.exe"
+          if (-not (Test-Path $exe)) { throw "not installed" }
+          & $exe --version
+          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\ZT Remote Desktop\unins000.exe")) { throw "no uninstaller" }
+          Start-Process "$env:LOCALAPPDATA\Programs\ZT Remote Desktop\unins000.exe" -ArgumentList "/VERYSILENT" -Wait
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+
+  mac-build:
     needs: test
     strategy:
-      fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            name: ZT-Remote-Desktop-Windows
-            backend: _win32
-          - os: macos-latest        # Apple Silicon
-            name: ZT-Remote-Desktop-macOS-arm64
-            backend: _darwin
-          - os: macos-15-intel      # Intel Macs
-            name: ZT-Remote-Desktop-macOS-intel
-            backend: _darwin
+          - os: macos-latest       # Apple Silicon
+            arch: arm64
+          - os: macos-15-intel     # Intel
+            arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -49,43 +120,84 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - name: Build one-file program
-        shell: bash
+      - name: Build
         run: |
-          SEP=":"; [ "$RUNNER_OS" = "Windows" ] && SEP=";"
-          pyinstaller --onefile --name ZT-Remote-Desktop \
-            --add-data "client.html${SEP}." \
-            --hidden-import pynput.keyboard.${{ matrix.backend }} \
-            --hidden-import pynput.mouse.${{ matrix.backend }} \
-            agent.py
-      - name: Smoke test the build (demo mode serves the client)
-        shell: bash
+          pyinstaller --onefile --name ZT-Remote-Desktop --add-data "client.html:." \
+            --hidden-import pynput.keyboard._darwin --hidden-import pynput.mouse._darwin agent.py
+          file dist/ZT-Remote-Desktop | grep -q "${{ matrix.arch }}"
+      - name: Smoke test
         run: |
-          cd dist
-          ./ZT-Remote-Desktop --demo --bind 127.0.0.1 --port 8799 &
+          dist/ZT-Remote-Desktop --version
+          dist/ZT-Remote-Desktop --demo --bind 127.0.0.1 --port 8799 &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8799/health && break; sleep 1; done
           curl -sf http://127.0.0.1:8799/ | grep -q "ZT Remote Desktop"
           kill %1 || true
-          rm -f zt-remote-config.json
-      - name: Package
-        shell: bash
-        run: |
-          mkdir pkg && cp dist/ZT-Remote-Desktop* pkg/ && cp README.md pkg/
-          cd pkg && 7z a ../${{ matrix.name }}.zip . > /dev/null
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.zip
+          name: mac-${{ matrix.arch }}
+          path: dist/ZT-Remote-Desktop
+
+  mac-dmg:
+    needs: [test, mac-build]
+    runs-on: macos-latest
+    env:
+      V: ${{ needs.test.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mac-*
+      - name: Assemble universal app and DMG
+        run: |
+          APP="dmg/ZT Remote Desktop.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/arm64" "$APP/Contents/Resources/x86_64"
+          cp mac-arm64/ZT-Remote-Desktop  "$APP/Contents/Resources/arm64/"
+          cp mac-x86_64/ZT-Remote-Desktop "$APP/Contents/Resources/x86_64/"
+          chmod +x "$APP"/Contents/Resources/*/ZT-Remote-Desktop
+          cp packaging/mac/launcher.sh "$APP/Contents/MacOS/ZT Remote Desktop"
+          chmod +x "$APP/Contents/MacOS/ZT Remote Desktop"
+          sed "s/__VERSION__/$V/g" packaging/mac/Info.plist > "$APP/Contents/Info.plist"
+          plutil -lint "$APP/Contents/Info.plist"
+          codesign --force --sign - "$APP"
+          codesign --verify --verbose "$APP"
+          cp packaging/mac/READ-ME-FIRST.txt dmg/
+          ln -s /Applications dmg/Applications
+          mkdir -p out
+          hdiutil create -volname "ZT Remote Desktop" -srcfolder dmg -ov -format UDZO "out/ZT-Remote-Desktop-macOS-$V.dmg"
+      - name: Smoke test the DMG
+        run: |
+          MNT=$(hdiutil attach -nobrowse "out/ZT-Remote-Desktop-macOS-$V.dmg" | tail -1 | cut -f3)
+          R="$MNT/ZT Remote Desktop.app/Contents/Resources"
+          file "$R/arm64/ZT-Remote-Desktop" | grep -q arm64
+          file "$R/x86_64/ZT-Remote-Desktop" | grep -q x86_64
+          "$R/arm64/ZT-Remote-Desktop" --version
+          hdiutil detach "$MNT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: out/*.dmg
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [windows, mac-dmg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: "{windows,mac-dmg}"
           merge-multiple: true
+      - run: ls -l
       - uses: softprops/action-gh-release@v2
         with:
-          files: "*.zip"
+          files: |
+            *.exe
+            *.zip
+            *.dmg
           generate_release_notes: true
+          body: |
+            ## Downloads
+            - **Windows (install):** `ZT-Remote-Desktop-Setup-*.exe`. Installs for your user only, no admin rights needed. To update later, run the newer Setup; your password and settings are kept.
+            - **Windows (portable):** `ZT-Remote-Desktop-Windows-Portable-*.zip`. Unzip anywhere and run `ZT-Remote-Desktop.exe`.
+            - **macOS (Apple Silicon and Intel):** `ZT-Remote-Desktop-macOS-*.dmg`. Drag the app to Applications. The first time, right-click it and choose Open.
+
+            Running agents check for new releases on their own and show an "Update available" notice on the PC and on the phone.

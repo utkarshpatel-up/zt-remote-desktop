@@ -29,6 +29,9 @@ import time
 
 from aiohttp import web, WSMsgType
 
+VERSION = "1.1.0"          # CI checks that a release tag v<VERSION> matches this
+GITHUB_REPO = "utkarshpatel-up/zt-remote-desktop"
+
 if getattr(sys, "frozen", False):
     # standalone build (PyInstaller): config lives next to the .exe / binary,
     # client.html is unpacked with the program
@@ -37,7 +40,17 @@ if getattr(sys, "frozen", False):
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
     RES_DIR = HERE
-CONFIG_PATH = os.path.join(HERE, "zt-remote-config.json")
+if getattr(sys, "frozen", False) and sys.platform == "darwin":
+    # the Mac app's program sits inside the .app bundle, which is replaced on
+    # every update: keep the config in Application Support instead
+    CONFIG_DIR = os.path.join(os.path.expanduser("~"), "Library",
+                              "Application Support", "ZT Remote Desktop")
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+else:
+    CONFIG_DIR = HERE
+CONFIG_PATH = os.path.join(CONFIG_DIR, "zt-remote-config.json")
+# the Windows installer (Inno Setup) leaves its uninstaller next to the program
+INSTALLED = os.path.exists(os.path.join(HERE, "unins000.exe"))
 CLIENT_HTML = os.path.join(RES_DIR, "client.html")
 DEFAULT_PORT = 8765
 DEFAULT_ROLES = ["admin", "operator"]
@@ -66,6 +79,8 @@ def load_config():
         cfg["av_backup_server"] = ""     # "" = use the AV Backup app's setting if installed
     if not isinstance(cfg.get("av_backup_roles"), list):
         cfg["av_backup_roles"] = list(DEFAULT_ROLES)
+    if not isinstance(cfg.get("check_updates"), bool):
+        cfg["check_updates"] = True
     if cfg != before:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
@@ -463,6 +478,74 @@ class DemoInput:
 
 
 # --------------------------------------------------------------------------
+# Update check (GitHub releases)
+# --------------------------------------------------------------------------
+
+def parse_version(v):
+    """'v1.2.10' -> (1, 2, 10); anything unparsable -> None."""
+    m = re.match(r"^v?(\d+)\.(\d+)(?:\.(\d+))?$", str(v or "").strip())
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+def pick_download(assets, platform=None, installed=None):
+    """The release file this computer should download, by name."""
+    platform = platform or PLATFORM
+    installed = INSTALLED if installed is None else installed
+    if platform == "windows":
+        want = ("-setup-", ".exe") if installed else ("-portable-", ".zip")
+    elif platform == "mac":
+        want = ("-macos", ".dmg")
+    else:
+        return None
+    for a in assets or []:
+        name = str(a.get("name", "")).lower()
+        if want[0] in name and name.endswith(want[1]):
+            return a.get("browser_download_url")
+    return None
+
+
+class UpdateChecker:
+    """Asks GitHub for the latest release at start-up and every 12 hours."""
+
+    API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
+    def __init__(self, current=VERSION, api=None, interval=12 * 3600):
+        self.current, self.api, self.interval = current, api or self.API, interval
+        self.available = None   # {"version", "url", "page"} when newer
+
+    async def check_once(self):
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(self.api, headers={
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "zt-remote-desktop-update-check"}) as r:
+                    if r.status != 200:
+                        return None
+                    rel = await r.json(content_type=None)
+        except Exception:
+            return None
+        latest, mine = parse_version(rel.get("tag_name")), parse_version(self.current)
+        if not latest or not mine or latest <= mine or rel.get("draft") or rel.get("prerelease"):
+            self.available = None
+            return None
+        page = rel.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest"
+        found = {"version": ".".join(map(str, latest)), "page": page,
+                 "url": pick_download(rel.get("assets")) or page}
+        if found != self.available:
+            print(f"  *** Update available: v{found['version']} (you have v{self.current})")
+            print(f"      Download: {found['url']}")
+            sys.stdout.flush()
+        self.available = found
+        return found
+
+    async def run(self):
+        while True:
+            await self.check_once()
+            await asyncio.sleep(self.interval)
+
+
+# --------------------------------------------------------------------------
 # Web app
 # --------------------------------------------------------------------------
 
@@ -484,7 +567,7 @@ def _num(value, default, lo, hi):
     return min(hi, max(lo, v))
 
 
-def build_app(cfg, demo=False, demo_still=False, av_server=""):
+def build_app(cfg, demo=False, demo_still=False, av_server="", updates=None):
     capture = DemoCapture() if demo else RealCapture()
     if demo:
         capture.paused = demo_still
@@ -499,7 +582,7 @@ def build_app(cfg, demo=False, demo_still=False, av_server=""):
         return web.FileResponse(CLIENT_HTML)
 
     async def health(request):
-        return web.json_response({"ok": True, "demo": demo,
+        return web.json_response({"ok": True, "demo": demo, "version": VERSION,
                                   "av_backup": bool(av_server)})
 
     async def ws_handler(request):
@@ -551,7 +634,8 @@ def build_app(cfg, demo=False, demo_still=False, av_server=""):
         limiter.ok(ip)
         print(f"[auth] {ip} connected ({who})")
         sys.stdout.flush()
-        await ws.send_json({"type": "auth_ok", "demo": demo,
+        await ws.send_json({"type": "auth_ok", "demo": demo, "version": VERSION,
+                            "update": updates.available if updates else None,
                             "platform": PLATFORM})
 
         settings = {"fps": 12, "quality": 60, "max_width": 1280}
@@ -654,6 +738,15 @@ def build_app(cfg, demo=False, demo_still=False, av_server=""):
     app.router.add_get("/", index)
     app.router.add_get("/health", health)
     app.router.add_get("/ws", ws_handler)
+
+    if updates:
+        async def start_updates(app):
+            app["update_task"] = asyncio.create_task(updates.run())
+
+        async def stop_updates(app):
+            app["update_task"].cancel()
+        app.on_startup.append(start_updates)
+        app.on_cleanup.append(stop_updates)
     return app
 
 
@@ -668,9 +761,18 @@ def main():
     ap.add_argument("--av-server", default=None,
                     help="AV Backup team server address, e.g. http://10.7.0.5:8090 "
                          "(saved in the config; default: read from the AV Backup app)")
+    ap.add_argument("--version", action="version", version=f"ZT Remote Desktop {VERSION}")
+    ap.add_argument("--check-update", action="store_true",
+                    help="check GitHub for a newer version and exit")
     ap.add_argument("--bind", default="auto",
                     help="'auto' (ZeroTier interface only), 'all', or an IP")
     args = ap.parse_args()
+
+    if args.check_update:
+        found = asyncio.run(UpdateChecker().check_once())
+        if not found:
+            print(f"ZT Remote Desktop v{VERSION} is up to date (or GitHub could not be reached).")
+        return
 
     cfg = load_config()
     if args.av_server is not None:
@@ -686,13 +788,13 @@ def main():
     zt_ips = find_zerotier_ips()
 
     print("=" * 58)
-    print("  ZT Remote Desktop agent")
+    print(f"  ZT Remote Desktop agent v{VERSION}")
     print(f"  Mode        : {'DEMO' if args.demo else 'LIVE'}")
     print(f"  Listening on: {', '.join(f'{b}:{port}' for b in binds)}")
     for ip in zt_ips:
         print(f"  Open on your phone: http://{ip}:{port}")
     print(f"  Access password: {cfg['token']}")
-    print("  (saved as \"token\" in zt-remote-config.json - keep it private)")
+    print(f"  (saved as \"token\" in {CONFIG_PATH} - keep it private)")
     if av_server:
         print(f"  AV Backup login: ON  ({av_server}, from {av_source})")
         print(f"    allowed roles: {', '.join(cfg.get('av_backup_roles', DEFAULT_ROLES))}")
@@ -703,7 +805,9 @@ def main():
     sys.stdout.flush()
 
     web.run_app(build_app(cfg, demo=args.demo, demo_still=args.demo_still,
-                          av_server=av_server), host=binds, port=port,
+                          av_server=av_server,
+                          updates=UpdateChecker() if cfg.get("check_updates", True) else None),
+                host=binds, port=port,
                 print=None)
 
 

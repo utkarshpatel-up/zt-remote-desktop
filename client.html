@@ -28,6 +28,8 @@
   .bar span { font-size:12px; opacity:.7; align-self:center; margin-right:2px; }
   select { background:#0e1116; color:#e6ebf2; border:1px solid #2c3542; border-radius:6px; padding:5px; }
   #typeBox { flex:1; min-width:140px; }
+  #updateBanner { padding:7px 10px; background:#2a2410; color:#f3d98b; font-size:13px; }
+  #updateBanner a { color:#ffd75e; }
   .hidden { display:none !important; }
 </style>
 </head>
@@ -45,6 +47,7 @@
   <button id="disconnectBtn" class="secondary hidden">Disconnect</button>
   <span id="status">Not connected</span>
 </header>
+<div id="updateBanner" class="hidden"></div>
 
 <div id="screenWrap">
   <div id="stage">
@@ -264,7 +267,16 @@ $("connectBtn").onclick = () => {
         connected = true;
         platform = m.platform || "windows";
         applyPlatform();
-        setStatus("Connected" + (m.demo ? " (DEMO mode)" : ""));
+        setStatus("Connected" + (m.demo ? " (DEMO mode)" : "") + (m.version ? " · v" + m.version : ""));
+        const ub = $("updateBanner");
+        if (m.update && m.update.version) {
+          ub.textContent = "Update available for this PC: v" + m.update.version + " (it has v" + m.version + "). ";
+          const a = document.createElement("a");
+          a.href = m.update.page || m.update.url; a.target = "_blank"; a.rel = "noopener";
+          a.textContent = "What's new / download";
+          ub.appendChild(a);
+          ub.classList.remove("hidden");
+        } else ub.classList.add("hidden");
         $("connectBtn").classList.add("hidden");
         $("disconnectBtn").classList.remove("hidden");
         sendConfig();
