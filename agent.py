@@ -20,6 +20,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import sys
 import threading
@@ -56,36 +57,71 @@ def load_config():
 # ZeroTier interface detection
 # --------------------------------------------------------------------------
 
-def find_zerotier_ip():
-    """Return the IPv4 address of the ZeroTier interface, or None."""
+# ZeroTier names its adapter differently on every OS:
+#   Windows: "ZeroTier One [<network id>]"
+#   Linux:   "zt" + 8 letters/digits, e.g. "zt5u4y3kc6"
+#   macOS:   "feth" + digits (ZeroTier 1.6 and later), e.g. "feth2873"
+_ZT_IFACE = re.compile(r"^(zt[0-9a-z]{8}|feth\d+)$")
+
+
+def is_zerotier_interface(name):
+    n = str(name).lower()
+    return "zerotier" in n or bool(_ZT_IFACE.match(n))
+
+
+def find_zerotier_ips():
+    """Return the IPv4 addresses of all ZeroTier interfaces (may be empty)."""
     try:
         import psutil
     except Exception:
-        return None
+        return []
+    ips = []
     try:
         for name, addrs in psutil.net_if_addrs().items():
-            if "zerotier" not in name.lower():
+            if not is_zerotier_interface(name):
                 continue
             for a in addrs:
                 # AF_INET == 2
-                if a.family == 2 and a.address and not a.address.startswith("169.254"):
-                    return a.address
+                if (a.family == 2 and a.address and not a.address.startswith("169.254")
+                        and a.address not in ips):
+                    ips.append(a.address)
     except Exception:
-        return None
-    return None
+        return []
+    return ips
 
 
-def resolve_bind(requested):
-    """Decide which local address to listen on."""
+def find_zerotier_ip():
+    """Return the first ZeroTier IPv4 address, or None."""
+    ips = find_zerotier_ips()
+    return ips[0] if ips else None
+
+
+def resolve_bind(requested, wait=True, poll_seconds=3.0):
+    """Decide which local address(es) to listen on.
+
+    'auto' listens only on ZeroTier. If ZeroTier is not up yet (the agent was
+    started at login before ZeroTier connected), it waits for it instead of
+    opening the agent to the LAN. 'all' is the explicit opt-in for every
+    interface.
+    """
     if requested and requested != "auto":
-        return "0.0.0.0" if requested == "all" else requested
-    zt_ip = find_zerotier_ip()
-    if zt_ip:
-        return zt_ip
-    print("WARNING: No ZeroTier interface found. Falling back to 0.0.0.0 "
-          "(reachable on your LAN). The access token is still required, "
-          "but prefer running with ZeroTier connected.")
-    return "0.0.0.0"
+        return ["0.0.0.0"] if requested == "all" else [requested]
+    ips = find_zerotier_ips()
+    if ips or not wait:
+        return ips
+    print("Waiting for ZeroTier to connect... (the agent listens only on "
+          "ZeroTier; use --bind all to listen on every network instead)")
+    sys.stdout.flush()
+    last_note = time.monotonic()
+    while not ips:
+        time.sleep(poll_seconds)
+        ips = find_zerotier_ips()
+        if not ips and time.monotonic() - last_note >= 60:
+            print("Still waiting for ZeroTier. Check the ZeroTier app shows "
+                  "this computer as Connected.")
+            sys.stdout.flush()
+            last_note = time.monotonic()
+    return ips
 
 
 # --------------------------------------------------------------------------
@@ -109,11 +145,23 @@ class RealCapture:
             self.screen_w, self.screen_h = mon["width"], mon["height"]
         return self._local.sct
 
-    def frame_jpeg(self, quality, max_width):
+    def frame_jpeg(self, quality, max_width, state=None):
+        """Return (jpeg or None, screen_w, screen_h).
+
+        `state` is a per-connection dict. When the screen and the settings are
+        the same as the frame last sent on that connection, the JPEG is None
+        and nothing is encoded or sent.
+        """
         from PIL import Image
         sct = self._sct()
         mon = sct.monitors[1]
         raw = sct.grab(mon)
+        if state is not None:
+            key = (raw.size, quality, max_width)
+            pixels = raw.bgra
+            if state.get("key") == key and state.get("pixels") == pixels:
+                return None, self.screen_w, self.screen_h
+            state["key"], state["pixels"] = key, pixels
         img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
         if max_width and img.width > max_width:
             h = int(img.height * max_width / img.width)
@@ -131,9 +179,15 @@ class DemoCapture:
         self._n = 0
         self.cursor = (640, 360)
         self.last_event = "demo ready"
+        # --demo-still: freeze the picture so unchanged-frame skipping can be tested
+        self.paused = False
 
-    def frame_jpeg(self, quality, max_width):
+    def frame_jpeg(self, quality, max_width, state=None):
         from PIL import Image, ImageDraw
+        if self.paused and state is not None and state.get("sent"):
+            return None, self.screen_w, self.screen_h
+        if state is not None:
+            state["sent"] = True
         self._n += 1
         img = Image.new("RGB", (960, 540), (24, 28, 38))
         d = ImageDraw.Draw(img)
@@ -162,7 +216,10 @@ SPECIAL_KEYS = {
     "pageup": "page_up", "pagedown": "page_down",
     "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "shift": "shift",
     "cmd": "cmd", "win": "cmd", "command": "cmd", "meta": "cmd",
-    "capslock": "caps_lock",
+    "capslock": "caps_lock", "insert": "insert",
+    # names browsers use for KeyboardEvent.key
+    "arrowup": "up", "arrowdown": "down", "arrowleft": "left",
+    "arrowright": "right", "os": "cmd",
 }
 for _i in range(1, 13):
     SPECIAL_KEYS[f"f{_i}"] = f"f{_i}"
@@ -181,13 +238,18 @@ class RealInput:
     def _key(self, name):
         name = str(name).lower()
         if name in SPECIAL_KEYS:
-            return getattr(self._kb_cls.Key, SPECIAL_KEYS[name])
+            # some keys (e.g. insert) do not exist on every OS
+            return getattr(self._kb_cls.Key, SPECIAL_KEYS[name], None)
         if len(name) == 1:
             return name
         return None
 
     def move(self, x, y):
         self._mouse.position = (int(x), int(y))
+
+    def position(self):
+        x, y = self._mouse.position
+        return float(x), float(y)
 
     def button(self, btn, down):
         b = self._mouse_btn.get(btn, self._mouse_btn["left"])
@@ -240,6 +302,9 @@ class DemoInput:
         self._cap.cursor = (x, y)
         self._cap.last_event = f"move {int(x)},{int(y)}"
 
+    def position(self):
+        return float(self._cap.cursor[0]), float(self._cap.cursor[1])
+
     def button(self, btn, down):
         self._log(f"mouse {btn} {'down' if down else 'up'}")
 
@@ -263,8 +328,28 @@ class DemoInput:
 # Web app
 # --------------------------------------------------------------------------
 
-def build_app(cfg, demo=False):
+PLATFORM = ("mac" if sys.platform == "darwin"
+            else "windows" if sys.platform.startswith("win") else "linux")
+
+# allowed ranges for the client's stream settings
+SETTING_LIMITS = {"fps": (1, 30), "quality": (10, 95), "max_width": (0, 3840)}
+
+
+def _num(value, default, lo, hi):
+    """A finite number clamped to [lo, hi]; `default` when it is not one."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if v != v or v in (float("inf"), float("-inf")):
+        return default
+    return min(hi, max(lo, v))
+
+
+def build_app(cfg, demo=False, demo_still=False):
     capture = DemoCapture() if demo else RealCapture()
+    if demo:
+        capture.paused = demo_still
     controller = DemoInput(capture) if demo else RealInput()
     token = cfg["token"]
 
@@ -277,7 +362,9 @@ def build_app(cfg, demo=False):
         return web.json_response({"ok": True, "demo": demo})
 
     async def ws_handler(request):
-        ws = web.WebSocketResponse(max_msg_size=1 << 20)
+        # heartbeat: notice a phone that dropped off ZeroTier even when the
+        # screen is still and no frames are flowing
+        ws = web.WebSocketResponse(max_msg_size=1 << 20, heartbeat=20)
         await ws.prepare(request)
 
         # --- auth: first message must carry the token -------------------
@@ -298,21 +385,38 @@ def build_app(cfg, demo=False):
             await ws.send_json({"type": "auth_failed"})
             await ws.close()
             return ws
-        await ws.send_json({"type": "auth_ok", "demo": demo})
+        await ws.send_json({"type": "auth_ok", "demo": demo,
+                            "platform": PLATFORM})
 
         settings = {"fps": 12, "quality": 60, "max_width": 1280}
+        frame_state = {}   # this connection's last sent frame
         loop = asyncio.get_running_loop()
 
+        def grab():
+            data, sw, sh = capture.frame_jpeg(
+                settings["quality"], settings["max_width"], frame_state)
+            try:
+                cx, cy = controller.position()
+            except Exception:
+                cx = cy = None
+            return data, sw, sh, cx, cy
+
         async def stream():
+            last_meta = None
             while not ws.closed:
                 t0 = loop.time()
                 try:
-                    data, sw, sh = await loop.run_in_executor(
-                        None, capture.frame_jpeg,
-                        settings["quality"], settings["max_width"])
-                    await ws.send_json({"type": "meta",
-                                        "screen_w": sw, "screen_h": sh})
-                    await ws.send_bytes(data)
+                    data, sw, sh, cx, cy = await loop.run_in_executor(None, grab)
+                    meta = {"type": "meta", "screen_w": sw, "screen_h": sh}
+                    if cx is not None and sw and sh:
+                        meta["cx"] = round(min(1.0, max(0.0, cx / sw)), 4)
+                        meta["cy"] = round(min(1.0, max(0.0, cy / sh)), 4)
+                    # only send what changed: a still screen costs nothing
+                    if meta != last_meta:
+                        await ws.send_json(meta)
+                        last_meta = meta
+                    if data is not None:
+                        await ws.send_bytes(data)
                 except (ConnectionResetError, asyncio.CancelledError):
                     break
                 except Exception as e:  # capture hiccup: report, keep going
@@ -322,13 +426,50 @@ def build_app(cfg, demo=False):
                         break
                     await asyncio.sleep(0.5)
                 elapsed = loop.time() - t0
-                await asyncio.sleep(max(0.0, 1.0 / max(1, settings["fps"]) - elapsed))
+                await asyncio.sleep(max(0.0, 1.0 / settings["fps"] - elapsed))
 
         stream_task = asyncio.ensure_future(stream())
 
         def scale(msg):
-            return (float(msg.get("x", 0)) * capture.screen_w,
-                    float(msg.get("y", 0)) * capture.screen_h)
+            return (_num(msg.get("x"), 0, 0, 1) * capture.screen_w,
+                    _num(msg.get("y"), 0, 0, 1) * capture.screen_h)
+
+        def handle(msg):
+            kind = msg.get("type")
+            if kind == "config":
+                for k, (lo, hi) in SETTING_LIMITS.items():
+                    if k in msg:
+                        settings[k] = int(_num(msg[k], settings[k], lo, hi))
+                if settings["max_width"] and settings["max_width"] < 320:
+                    settings["max_width"] = 320   # 0 = original size
+            elif kind == "mouse_move":
+                controller.move(*scale(msg))
+            elif kind == "mouse_move_rel":
+                # trackpad mode: dx/dy are fractions of the screen size
+                if capture.screen_w and capture.screen_h:
+                    x, y = controller.position()
+                    x += _num(msg.get("dx"), 0, -1, 1) * capture.screen_w
+                    y += _num(msg.get("dy"), 0, -1, 1) * capture.screen_h
+                    controller.move(min(capture.screen_w - 1, max(0, x)),
+                                    min(capture.screen_h - 1, max(0, y)))
+            elif kind == "mouse_down":
+                # without x/y the button goes down where the cursor already is
+                if "x" in msg and "y" in msg:
+                    controller.move(*scale(msg))
+                controller.button(msg.get("button", "left"), True)
+            elif kind == "mouse_up":
+                controller.button(msg.get("button", "left"), False)
+            elif kind == "scroll":
+                controller.scroll(_num(msg.get("dx"), 0, -50, 50),
+                                  _num(msg.get("dy"), 0, -50, 50))
+            elif kind == "key":
+                controller.key_tap(msg.get("key", ""), msg.get("modifiers"))
+            elif kind == "key_down":
+                controller.key_down(msg.get("key", ""))
+            elif kind == "key_up":
+                controller.key_up(msg.get("key", ""))
+            elif kind == "text":
+                controller.type_text(str(msg.get("text", "")))
 
         try:
             async for raw in ws:
@@ -336,32 +477,10 @@ def build_app(cfg, demo=False):
                     continue
                 try:
                     msg = json.loads(raw.data)
-                except Exception:
-                    continue
-                kind = msg.get("type")
-                if kind == "config":
-                    for k in ("fps", "quality", "max_width"):
-                        if k in msg:
-                            settings[k] = msg[k]
-                elif kind == "mouse_move":
-                    x, y = scale(msg)
-                    controller.move(x, y)
-                elif kind == "mouse_down":
-                    x, y = scale(msg)
-                    controller.move(x, y)
-                    controller.button(msg.get("button", "left"), True)
-                elif kind == "mouse_up":
-                    controller.button(msg.get("button", "left"), False)
-                elif kind == "scroll":
-                    controller.scroll(msg.get("dx", 0), msg.get("dy", 0))
-                elif kind == "key":
-                    controller.key_tap(msg.get("key", ""), msg.get("modifiers"))
-                elif kind == "key_down":
-                    controller.key_down(msg.get("key", ""))
-                elif kind == "key_up":
-                    controller.key_up(msg.get("key", ""))
-                elif kind == "text":
-                    controller.type_text(str(msg.get("text", "")))
+                    if isinstance(msg, dict):
+                        handle(msg)
+                except Exception as e:  # one bad message must not end the session
+                    print(f"input error: {e}")
         finally:
             stream_task.cancel()
         return ws
@@ -376,6 +495,9 @@ def main():
     ap = argparse.ArgumentParser(description="ZT Remote Desktop agent")
     ap.add_argument("--demo", action="store_true",
                     help="test pattern + logged input, no real screen control")
+    ap.add_argument("--demo-still", action="store_true",
+                    help="with --demo: a still picture (tests that unchanged "
+                         "frames are not resent)")
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--bind", default="auto",
                     help="'auto' (ZeroTier interface only), 'all', or an IP")
@@ -383,21 +505,21 @@ def main():
 
     cfg = load_config()
     port = args.port or cfg["port"]
-    bind = resolve_bind(args.bind)
-    zt_ip = find_zerotier_ip()
+    binds = resolve_bind(args.bind)
+    zt_ips = find_zerotier_ips()
 
     print("=" * 58)
     print("  ZT Remote Desktop agent")
     print(f"  Mode        : {'DEMO' if args.demo else 'LIVE'}")
-    print(f"  Listening on: {bind}:{port}")
-    if zt_ip:
-        print(f"  Open on your phone: http://{zt_ip}:{port}")
+    print(f"  Listening on: {', '.join(f'{b}:{port}' for b in binds)}")
+    for ip in zt_ips:
+        print(f"  Open on your phone: http://{ip}:{port}")
     print(f"  Access token: {cfg['token']}")
     print("  (token is also saved in zt-remote-config.json - keep it private)")
     print("=" * 58)
     sys.stdout.flush()
 
-    web.run_app(build_app(cfg, demo=args.demo), host=bind, port=port,
+    web.run_app(build_app(cfg, demo=args.demo, demo_still=args.demo_still), host=binds, port=port,
                 print=None)
 
 
