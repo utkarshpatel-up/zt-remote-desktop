@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ZT Remote Desktop",
+  "mainBinaryName": "zt-remote-desktop",
+  "version": "2.0.0",
+  "identifier": "io.github.utkarshpatel-up.zt-remote-desktop",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "ZT Remote Desktop",
+        "width": 560,
+        "height": 760,
+        "minWidth": 420,
+        "minHeight": 520,
+        "backgroundColor": "#0e1116",
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "app",
+      "dmg"
+    ],
+    "createUpdaterArtifacts": true,
+    "category": "Utility",
+    "shortDescription": "Remote desktop over ZeroTier",
+    "longDescription": "Control this computer from your phone over your ZeroTier network. Sign in with an AV Backup team account or the access password.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMxMkZGNkExRTE5NUE5MzkKUldRNXFaWGhvZll2d2VuZ0pFNktVcTlwbUtwNmRrS3poYXloSEdNc2pLY0hPTG5UeklENldwVVoK",
+      "endpoints": [
+        "https://github.com/utkarshpatel-up/zt-remote-desktop/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

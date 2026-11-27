@@ -1,0 +1,43 @@
+[package]
+name = "zt-remote-desktop"
+version = "2.0.0"
+description = "Remote desktop over ZeroTier, controlled from a phone browser"
+edition = "2021"
+
+[lib]
+name = "zt_remote_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.8"
+subtle = "2"
+dirs = "6"
+
+# the host (the computer being controlled) only exists on desktop; a future
+# Android / iOS build of this app is the viewer
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+axum = { version = "0.8", features = ["ws"] }
+xcap = "0.9"
+enigo = "0.6"
+image = { version = "0.25", default-features = false }
+jpeg-encoder = "0.7"
+if-addrs = "0.15"
+tauri-plugin-updater = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-process = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
