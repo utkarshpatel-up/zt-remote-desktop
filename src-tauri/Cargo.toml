@@ -1,6 +1,6 @@
 [package]
 name = "zt-remote-desktop"
-version = "2.1.0"
+version = "2.0.0"
 description = "Remote desktop over ZeroTier, controlled from a phone browser"
 edition = "2021"
 
