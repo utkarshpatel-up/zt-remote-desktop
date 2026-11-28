@@ -22,6 +22,7 @@ From the [latest release](https://github.com/utkarshpatel-up/zt-remote-desktop/r
 | Windows (install) | `ZT-Remote-Desktop_<v>_x64-setup.exe` | Installs for your user, no admin rights. Updates from inside the app. |
 | Windows (portable) | `ZT-Remote-Desktop_<v>_Windows-Portable.zip` | Unzip anywhere and run `ZT Remote Desktop.exe`. Settings are kept next to the .exe. |
 | Mac (Apple Silicon and Intel) | `ZT-Remote-Desktop_<v>_universal.dmg` | Drag to Applications. First time: right-click → **Open**. |
+| Android phone (viewer, optional) | `ZT-Remote-Desktop_<v>_Android.apk` | Open it on the phone and allow installing from your browser/Files app. The phone's browser works too. |
 
 The builds aren't code-signed by Microsoft or Apple:
 - **Windows:** SmartScreen may warn once: **More info → Run anyway**. Allow
@@ -41,7 +42,9 @@ it waits ("Waiting for ZeroTier…") until ZeroTier is connected.
 
 1. Start the app on the computer. Its window shows the address, e.g.
    `http://10.147.20.5:8765`.
-2. On your phone (with ZeroTier on), open that address in the browser.
+2. On your phone (with ZeroTier on), open that address in the browser, **or**
+   open the Android app and type the address once (it is remembered; `:8765`
+   is added if you leave out the port).
 3. Sign in and tap **Connect**:
    - **AV Backup account:** your AV Backup e-mail and password.
    - **Access password:** the password shown in the app window. Use this if
@@ -94,6 +97,7 @@ check that the team server already has.
 - **Installed (Windows Setup or Mac app):** when a new version is out, the app
   window shows **Update now**. It downloads the update, checks its signature,
   installs it and restarts. Your password and settings are kept.
+- **Android app:** install the newer APK over the old one (same signature, settings kept).
 - **Portable Windows copy:** the app shows that an update exists. Download
   the new zip and replace the .exe.
 - The phone page also shows "Update available for this PC" when you connect.
@@ -133,8 +137,14 @@ On Linux, install the libraries listed in `.github/workflows/build.yml` first.
   `python tests/test_av_login.py`, `tests/test_update.py`,
   `tests/test_client.py <url> <password>`).
 
+**Android without Android Studio:** CI builds the APK with only the Android
+command-line SDK, NDK and a JDK (`npx tauri android init`, then
+`npx tauri android build --apk`), and signs it with the `ANDROID_KEYSTORE`
+secret. Every APK must be signed with that same key, or phones refuse to
+install the update over the old version.
+
 **Making a release:** bump `version` in `src-tauri/tauri.conf.json`,
 `src-tauri/Cargo.toml` and `package.json`, merge to `main`, then push a tag
-`v<version>`. CI builds all three packages, signs the update bundles with the
+`v<version>`. CI builds all four packages, signs the update bundles with the
 `TAURI_SIGNING_PRIVATE_KEY` secret, publishes the release and `latest.json`,
 and installed apps then offer the update.

@@ -5,6 +5,7 @@ name: Test and build
 #   1. Windows installer   ZT-Remote-Desktop_<v>_x64-setup.exe
 #   2. Windows portable    ZT-Remote-Desktop_<v>_Windows-Portable.zip
 #   3. macOS universal     ZT-Remote-Desktop_<v>_universal.dmg  (Apple Silicon + Intel)
+#   4. Android viewer      ZT-Remote-Desktop_<v>_Android.apk
 # plus latest.json + signed update bundles, which installed apps use to
 # update themselves ("Update now" in the app).
 
@@ -154,9 +155,64 @@ jobs:
           name: mac
           path: out/*
 
+  android:
+    needs: test
+    runs-on: ubuntu-24.04
+    env:
+      V: ${{ needs.test.outputs.version }}
+      NDK_VERSION: "27.2.12479018"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - name: Android SDK parts (preinstalled command-line SDK, no Android Studio)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKM=$(ls $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "ndk;$NDK_VERSION" "platforms;android-35" "build-tools;35.0.0" | tail -2
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - run: npm ci || npm install
+      - name: Generate the Android project
+        run: |
+          npx tauri android init --ci
+          # the app talks to computers on ZeroTier over plain http/ws (ZeroTier itself is encrypted)
+          G=src-tauri/gen/android/app/build.gradle.kts
+          sed -i 's/manifestPlaceholders\["usesCleartextTraffic"\] = "false"/manifestPlaceholders["usesCleartextTraffic"] = "true"/' $G
+          grep -n usesCleartextTraffic $G
+          ! grep -q 'usesCleartextTraffic"\] = "false"' $G
+      - name: Build APK (arm64, armv7, x86_64)
+        run: npx tauri android build --apk --target aarch64 armv7 x86_64
+      - name: Sign APK
+        env:
+          KS: ${{ secrets.ANDROID_KEYSTORE }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          BT=$ANDROID_HOME/build-tools/35.0.0
+          APK=$(find src-tauri/gen/android -name "*-release-unsigned.apk" | head -1)
+          echo "built: $APK"
+          mkdir -p out
+          echo "$KS" | base64 -d > ks.jks
+          $BT/zipalign -f -p 4 "$APK" aligned.apk
+          $BT/apksigner sign --ks ks.jks --ks-pass env:KS_PASS --ks-key-alias zt-remote \
+            --out "out/ZT-Remote-Desktop_${V}_Android.apk" aligned.apk
+          rm ks.jks
+          $BT/apksigner verify --print-certs "out/ZT-Remote-Desktop_${V}_Android.apk" | head -3
+          $BT/aapt2 dump badging "out/ZT-Remote-Desktop_${V}_Android.apk" | grep -E "^package|native-code"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: android
+          path: out/*.apk
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, windows, mac]
+    needs: [test, windows, mac, android]
     runs-on: ubuntu-24.04
     env:
       V: ${{ needs.test.outputs.version }}
@@ -191,5 +247,6 @@ jobs:
             - **Windows, install:** `ZT-Remote-Desktop_${{ env.V }}_x64-setup.exe`. Installs for your user only, no admin needed. Later updates install from inside the app (**Update now**).
             - **Windows, portable:** `ZT-Remote-Desktop_${{ env.V }}_Windows-Portable.zip`. Unzip anywhere and run `ZT Remote Desktop.exe`. It keeps its settings next to the .exe and tells you when a new version is out.
             - **macOS (Apple Silicon and Intel):** `ZT-Remote-Desktop_${{ env.V }}_universal.dmg`. Drag the app to Applications. The first time, right-click it and choose **Open**. Later updates install from inside the app.
+            - **Android phone (viewer):** `ZT-Remote-Desktop_${{ env.V }}_Android.apk`. Open it on the phone and allow "install unknown apps" for your browser or Files app. In the app, type the computer's ZeroTier address once, then sign in. To update, install the newer APK over it. You can still use the phone's browser instead.
 
             The builds aren't code-signed by Microsoft or Apple, so Windows SmartScreen may ask once (**More info → Run anyway**). Updates are signed with this project's own update key and checked before they install.

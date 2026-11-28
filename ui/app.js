@@ -1,4 +1,6 @@
 // Desktop window of the host app. Talks to Rust through Tauri commands.
+// On Android / iOS the app is the viewer instead.
+if (/Android|iPhone|iPad/i.test(navigator.userAgent)) location.replace("viewer.html");
 const { invoke } = window.__TAURI__.core;
 const $ = id => document.getElementById(id);
 let state = null, showPw = false, editingAv = false;
